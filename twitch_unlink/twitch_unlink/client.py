@@ -60,7 +60,12 @@ class SocialLink:
 
 
 class TwitchUnlinkClient:
-    def __init__(self, token: str, client_id: str = DEFAULT_CLIENT_ID) -> None:
+    def __init__(
+        self,
+        token: str,
+        client_id: str = DEFAULT_CLIENT_ID,
+        proxy: str | None = None,
+    ) -> None:
         self.token = self.normalize_token(token)
         self.client_id = client_id
         self._session = requests.Session()
@@ -71,6 +76,24 @@ class TwitchUnlinkClient:
                 "Content-Type": "application/json",
             }
         )
+        self._proxy_rotator: Any = None
+        self.user_id: str | None = None
+        self.login: str | None = None
+        self.apply_proxy(proxy)
+
+    def attach_proxy_rotator(self, rotator: Any) -> None:
+        self._proxy_rotator = rotator
+        self.apply_proxy(rotator.current())
+
+    def apply_proxy(self, proxy: str | None) -> None:
+        if proxy:
+            self._session.proxies = {"http": proxy, "https": proxy}
+        else:
+            self._session.proxies = {}
+
+    def _sync_proxy(self) -> None:
+        if self._proxy_rotator is not None:
+            self.apply_proxy(self._proxy_rotator.current())
 
     @staticmethod
     def normalize_token(raw: str) -> str:
@@ -94,18 +117,22 @@ class TwitchUnlinkClient:
         return TwitchUnlinkClient.normalize_token(line)
 
     def validate(self) -> TokenInfo:
+        self._sync_proxy()
         response = self._session.get(VALIDATE_URL, timeout=30)
         if response.status_code == 401:
             raise PermissionError("Токен недействителен или истёк.")
         response.raise_for_status()
         data = response.json()
-        return TokenInfo(
+        info = TokenInfo(
             client_id=str(data.get("client_id", "")),
             login=str(data.get("login", "")),
             user_id=str(data.get("user_id", "")),
             scopes=list(data.get("scopes") or []),
             expires_in=data.get("expires_in"),
         )
+        self.login = info.login
+        self.user_id = info.user_id
+        return info
 
     def gql(
         self,
@@ -119,6 +146,7 @@ class TwitchUnlinkClient:
         if operation_name:
             payload["operationName"] = operation_name
 
+        self._sync_proxy()
         response = self._session.post(GQL_URL, data=json.dumps(payload), timeout=30)
         response.raise_for_status()
         body = response.json()
