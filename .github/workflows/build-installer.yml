@@ -7,6 +7,7 @@ on:
       - cursor/twitch-unlink-companies-3f6a
     paths:
       - twitch_unlink/**
+      - .github/workflows/build-installer.yml
 
 jobs:
   windows:
