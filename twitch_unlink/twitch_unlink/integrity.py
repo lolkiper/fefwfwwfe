@@ -74,19 +74,8 @@ class TwitchIntegrity:
         self._token = token
         return token
 
-    def _refresh_browser(self, oauth_token: str) -> str:
-        from twitch_unlink.integrity_browser import fetch_integrity_via_browser
-
-        token, expires = fetch_integrity_via_browser(
-            oauth_token,
-            client_id=self.client_id,
-            client_version=self.client_version,
-            device_id=self.device_id,
-            session_id=self.session_id,
-        )
-        self._expires_at = expires
-        self._token = token
-        return token
+    def _refresh_browser(self, oauth_token: str, proxy_url: str | None = None) -> str:
+        raise RuntimeError("Отвязка выполняется через браузер (см. unlink_drop_game_in_browser).")
 
     def refresh(
         self,

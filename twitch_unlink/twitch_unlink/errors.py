@@ -15,9 +15,8 @@ def format_user_error(exc: BaseException) -> str:
         msg = str(exc)
         if "failed integrity check" in msg.lower():
             return (
-                "Twitch отклонил integrity-проверку. Установите 1.3.4+, "
-                "убедитесь что установлен Google Chrome, нажмите «Сброс прокси» и повторите отвязку "
-                "(на пару секунд откроется Chrome). Иначе отвяжите игру на twitch.tv/drops/inventory."
+                "Twitch отклонил integrity. Установите 1.3.5+, Chrome, «Сброс прокси». "
+                "Отвязка идёт через Chrome — не закрывайте окно браузера, пока не исчезнет."
             )
         if msg:
             return msg

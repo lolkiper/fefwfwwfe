@@ -44,6 +44,8 @@ class TwitchDropsApp:
         self._proxy_countdown = tk.StringVar(value="Прокси: не заданы")
         self._status = tk.StringVar(value="Выберите файл с аккаунтами")
         self._user_label = tk.StringVar(value="—")
+        self._acc_count = tk.StringVar(value="Аккаунты: 0")
+        self._bulk_running = False
         self._work_q: queue.Queue[tuple[Callable[..., Any], tuple, dict]] = queue.Queue()
         self._ui_q: queue.Queue[tuple[Callable[..., Any], tuple, dict]] = queue.Queue()
 
@@ -92,7 +94,13 @@ class TwitchDropsApp:
         ttk.Button(toolbar, text="Файл аккаунтов…", command=self._pick_accounts).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="Файл прокси…", command=self._pick_proxies).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="Сброс прокси", command=self._clear_proxies).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(toolbar, text="Обновить игры", command=self._refresh_games).pack(side=tk.LEFT)
+        ttk.Button(toolbar, text="Обновить игры", command=self._refresh_games).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            toolbar,
+            text="Отвязать на ВСЕХ аккаунтах",
+            style="Accent.TButton",
+            command=self._bulk_unlink_all,
+        ).pack(side=tk.LEFT)
         ttk.Label(toolbar, textvariable=self._proxy_countdown, style="Muted.TLabel").pack(side=tk.RIGHT)
 
         body = ttk.Panedwindow(self.root, orient=tk.HORIZONTAL)
@@ -101,6 +109,13 @@ class TwitchDropsApp:
         left = ttk.Frame(body, style="Panel.TFrame", padding=8)
         body.add(left, weight=1)
         ttk.Label(left, text="Аккаунты (login:password:token)", style="Panel.TLabel").pack(anchor=tk.W)
+        ttk.Label(left, textvariable=self._acc_count, style="Muted.TLabel").pack(anchor=tk.W, pady=(2, 0))
+        acc_filter = ttk.Frame(left, style="Panel.TFrame")
+        acc_filter.pack(fill=tk.X, pady=(6, 4))
+        ttk.Label(acc_filter, text="Поиск:", style="Panel.TLabel").pack(side=tk.LEFT)
+        self._acc_search = ttk.Entry(acc_filter)
+        self._acc_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        self._acc_search.bind("<KeyRelease>", lambda _e: self._render_account_list())
         acc_frame = ttk.Frame(left, style="Panel.TFrame")
         acc_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 0))
         acc_scroll = ttk.Scrollbar(acc_frame)
@@ -207,10 +222,8 @@ class TwitchDropsApp:
             return
         self._accounts = accounts
         self._accounts_path = path
-        self._account_list.delete(0, tk.END)
-        for acc in accounts:
-            self._account_list.insert(tk.END, acc.display_name)
-        self._status.set(f"Загружено аккаунтов: {len(accounts)} — {path}")
+        self._render_account_list()
+        self._status.set(f"Загружено {len(accounts)} аккаунтов (без лимита) — {path}")
         self._clear_games()
         if accounts:
             self._account_list.selection_set(0)
@@ -262,6 +275,92 @@ class TwitchDropsApp:
                 left = max(0, int(st.seconds_until_rotation))
                 self._proxy_countdown.set(f"Прокси {st.index + 1}/{st.total} · смена через {left} с")
         self.root.after(500, self._tick_proxy_label)
+
+    def _render_account_list(self) -> None:
+        self._account_list.delete(0, tk.END)
+        query = self._acc_search.get().strip().lower() if hasattr(self, "_acc_search") else ""
+        shown = 0
+        for acc in self._accounts:
+            if query and query not in acc.display_name.lower():
+                continue
+            self._account_list.insert(tk.END, acc.display_name)
+            shown += 1
+        total = len(self._accounts)
+        self._acc_count.set(f"В файле: {total} · в списке: {shown} (лимита нет)")
+
+    def _proxy_url_for_browser(self) -> str | None:
+        if self._proxy_rotator:
+            return self._proxy_rotator.current()
+        if self._client:
+            return self._client.current_proxy_url()
+        return None
+
+    def _bulk_unlink_all(self) -> None:
+        if self._bulk_running:
+            messagebox.showinfo("Массовая отвязка", "Уже выполняется…")
+            return
+        if not self._accounts:
+            messagebox.showinfo("Массовая отвязка", "Сначала загрузите файл с аккаунтами.")
+            return
+        game = self._selected_game()
+        cid = game.client_id if game else self._manual_id.get().strip()
+        label = game.name if game else cid
+        if not cid:
+            messagebox.showinfo(
+                "Массовая отвязка",
+                "Выберите игру в таблице или введите client_id вручную.",
+            )
+            return
+        total = len(self._accounts)
+        if not messagebox.askyesno(
+            "Массовая отвязка",
+            f"Отвязать «{label}» на {total} аккаунтах?\n\n"
+            "Chrome откроется для каждого аккаунта. Прокси: сбросьте, если были 502.",
+        ):
+            return
+
+        self._bulk_running = True
+        proxy = self._proxy_url_for_browser()
+
+        def work() -> tuple[int, int]:
+            from twitch_unlink.integrity_browser import SharedBrowserUnlinker
+
+            ok = 0
+            fail = 0
+            with SharedBrowserUnlinker(proxy) as runner:
+                for idx, acc in enumerate(self._accounts, start=1):
+                    self._ui_q.put(
+                        (
+                            self._status.set,
+                            (f"Массовая отвязка {idx}/{total}: {acc.display_name}…",),
+                            {},
+                        )
+                    )
+                    try:
+                        runner.unlink_one(acc.token, cid)
+                        ok += 1
+                    except Exception:
+                        fail += 1
+            return ok, fail
+
+        def done(result: tuple[int, int]) -> None:
+            self._bulk_running = False
+            ok, fail = result
+            self._status.set(f"Массово готово: успех {ok}, ошибок {fail} из {total}")
+            messagebox.showinfo("Массовая отвязка", f"Успешно: {ok}\nОшибок: {fail}\nВсего: {total}")
+
+        def err_close() -> None:
+            self._bulk_running = False
+
+        def worker() -> None:
+            try:
+                result = work()
+                self._ui_q.put((done, (result,), {}))
+            except Exception as exc:  # noqa: BLE001
+                self._ui_q.put((self._show_error_exc, (exc,), {}))
+                self._ui_q.put((err_close, (), {}))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _on_account_selected(self) -> None:
         sel = self._account_list.curselection()

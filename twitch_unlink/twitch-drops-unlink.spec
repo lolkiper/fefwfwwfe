@@ -17,6 +17,7 @@ a = Analysis(
         "twitch_unlink.errors",
         "twitch_unlink.integrity",
         "twitch_unlink.integrity_browser",
+        "twitch_unlink.gql_mutations",
         "playwright",
         "playwright.sync_api",
         "socks",

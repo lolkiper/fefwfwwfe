@@ -116,6 +116,11 @@ class TwitchUnlinkClient:
         else:
             self._session.proxies = {}
 
+    def current_proxy_url(self) -> str | None:
+        if not self._session.proxies:
+            return None
+        return self._session.proxies.get("https") or self._session.proxies.get("http")
+
     def _sync_proxy(self) -> None:
         if self._proxy_rotator is not None:
             self.apply_proxy(self._proxy_rotator.current())
@@ -392,14 +397,29 @@ class TwitchUnlinkClient:
 
     def unlink_drop_game(self, client_id: str) -> None:
         """Отвязать игровой аккаунт Drops (OAuth client ID игры / издателя)."""
-        mutation = """
-        mutation DeleteOauthApp($id: ID!) {
-          deleteOauthApp(input: { id: $id }) {
-            __typename
-          }
-        }
-        """
-        self.gql(mutation, {"id": client_id}, operation_name="DeleteOauthApp", integrity=True)
+        from twitch_unlink.integrity_browser import unlink_drop_game_in_browser
+
+        try:
+            unlink_drop_game_in_browser(
+                self.token,
+                client_id,
+                twitch_client_id=self.client_id,
+                proxy_url=self.current_proxy_url(),
+                integrity=self._integrity,
+            )
+            return
+        except Exception as browser_exc:
+            mutation = """
+            mutation DeleteOauthApp($id: ID!) {
+              deleteOauthApp(input: { id: $id }) {
+                __typename
+              }
+            }
+            """
+            try:
+                self.gql(mutation, {"id": client_id}, operation_name="DeleteOauthApp", integrity=True)
+            except Exception:
+                raise RuntimeError(str(browser_exc)) from browser_exc
 
     def list_drop_game_links(self) -> list[DropGameLink]:
         query = """
