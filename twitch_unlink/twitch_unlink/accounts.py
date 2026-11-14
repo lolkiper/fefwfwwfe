@@ -24,15 +24,13 @@ def parse_account_line(line: str, line_number: int) -> AccountLine | None:
     stripped = line.strip()
     if not stripped or stripped.startswith("#"):
         return None
-    file_login: str | None = None
-    if ":" in stripped:
-        parts = stripped.split(":")
-        if len(parts) < 3:
-            return None
-        file_login = parts[0].strip() or None
+    if stripped.count(":") < 2 and not stripped.lower().startswith("oauth"):
+        return None
     try:
-        token = TwitchUnlinkClient.parse_credentials_line(stripped)
+        file_login, token = TwitchUnlinkClient.split_credential_fields(stripped)
     except ValueError:
+        return None
+    if not token:
         return None
     preview = stripped if len(stripped) <= 48 else stripped[:45] + "…"
     return AccountLine(

@@ -119,12 +119,14 @@ class TwitchUnlinkClient:
 
     def _max_proxy_attempts(self) -> int:
         if self._proxy_rotator is not None:
-            return max(1, self._proxy_rotator.total)
+            return min(15, max(1, self._proxy_rotator.total))
         return 1
 
     def _with_proxy_retry(self, make_request: Callable[[], requests.Response]) -> requests.Response:
         last: Exception | None = None
         attempts = self._max_proxy_attempts()
+        used_proxy = self._proxy_rotator is not None and self._proxy_rotator.total > 0
+
         for attempt in range(attempts):
             self._sync_proxy()
             try:
@@ -135,6 +137,7 @@ class TwitchUnlinkClient:
                 requests.exceptions.ProxyError,
                 requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,
+                OSError,
             ) as exc:
                 last = exc
                 if attempt + 1 >= attempts:
@@ -143,26 +146,51 @@ class TwitchUnlinkClient:
                     self._proxy_rotator.advance()
                 else:
                     break
+
+        if used_proxy:
+            self.apply_proxy(None)
+            try:
+                return make_request()
+            except requests.exceptions.HTTPError:
+                raise
+            except (
+                requests.exceptions.ProxyError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+                OSError,
+            ) as direct_exc:
+                last = direct_exc
+
         masked = mask_proxy(self._session.proxies.get("https") if self._session.proxies else None)
         hint = f" Последний прокси: {masked}." if masked else ""
         raise ProxyConnectionError(
-            f"Не удалось связаться с Twitch через прокси ({attempts} шт. в списке).{hint} "
-            "Скорее всего прокси мёртвые (502) — обновите файл или нажмите «Сброс прокси»."
+            f"Не удалось связаться с Twitch ({attempts} прокси + прямое подключение).{hint} "
+            "Проверьте интернет, токен или нажмите «Сброс прокси»."
         ) from last
 
     @staticmethod
-    def normalize_token(raw: str) -> str:
+    def split_credential_fields(raw: str) -> tuple[str | None, str]:
+        """login:password:token — пароль может содержать «:», токен всегда последнее поле."""
         value = raw.strip()
         if not value:
-            raise ValueError("Токен пустой.")
+            raise ValueError("Пустая строка.")
         if value.lower().startswith("oauth "):
-            value = value[6:].strip()
-        if ":" in value:
-            # login:password:token
-            value = value.rsplit(":", 1)[-1].strip()
-        if not value:
+            return None, value[6:].strip()
+        parts = value.split(":")
+        if len(parts) < 2:
+            return None, parts[0]
+        if len(parts) == 2:
+            return parts[0].strip() or None, parts[1].strip()
+        login = parts[0].strip() or None
+        token = parts[-1].strip()
+        return login, token
+
+    @staticmethod
+    def normalize_token(raw: str) -> str:
+        _, token = TwitchUnlinkClient.split_credential_fields(raw)
+        if not token:
             raise ValueError("Не удалось извлечь токен из строки.")
-        return value
+        return token
 
     @staticmethod
     def parse_credentials_line(line: str) -> str:

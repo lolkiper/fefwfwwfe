@@ -237,7 +237,9 @@ class TwitchDropsApp:
         self._proxy_rotator.start()
         if self._client:
             self._client.attach_proxy_rotator(self._proxy_rotator)
-        self._status.set(f"Прокси: {len(lines)} шт., смена каждые 60 с")
+        self._status.set(
+            f"Прокси: {len(lines)} шт. (если 502 — нажмите «Сброс прокси» или дождитесь прямого подключения)"
+        )
 
     def _clear_proxies(self) -> None:
         if self._proxy_rotator:
