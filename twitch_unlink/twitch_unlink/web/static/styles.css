@@ -65,6 +65,29 @@ body {
   box-shadow: 0 8px 24px rgba(145, 71, 255, 0.45);
 }
 
+.logo--drops {
+  background: linear-gradient(135deg, #00f593, #9147ff 55%, #772ce8);
+}
+
+.section-title {
+  margin: 0.25rem 0 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.panel--info {
+  padding: 0.85rem 1.1rem;
+}
+
+.panel--info .hint {
+  margin: 0;
+}
+
+.tag--live {
+  background: rgba(0, 245, 147, 0.15);
+  color: #6dffc8;
+}
+
 h1 {
   margin: 0;
   font-size: 1.65rem;

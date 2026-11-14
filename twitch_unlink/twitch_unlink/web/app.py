@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
@@ -9,18 +8,13 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from twitch_unlink.proxy_rotator import parse_proxy_list
-from twitch_unlink.web.session import (
-    SessionStore,
-    serialize_app,
-    serialize_org,
-    serialize_social,
-)
+from twitch_unlink.web.session import SessionStore, serialize_drop_game
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 DEFAULT_PROXY_INTERVAL = 60.0
 
 store = SessionStore()
-app = FastAPI(title="Twitch Unlink", version="1.1.0")
+app = FastAPI(title="Twitch Drops Unlink", version="1.2.0")
 
 if STATIC_DIR.is_dir():
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -34,8 +28,7 @@ class LoginRequest(BaseModel):
 
 class DisconnectRequest(BaseModel):
     session_id: str
-    kind: Literal["app", "social", "org"]
-    item_id: str
+    client_id: str
 
 
 def _require_session(session_id: str):
@@ -84,15 +77,12 @@ def session_status(session_id: str):
     }
 
 
-@app.get("/api/connections/{session_id}")
-def list_connections(session_id: str, q: str = ""):
+@app.get("/api/drop-games/{session_id}")
+def list_drop_games(session_id: str, q: str = ""):
     session = _require_session(session_id)
     client = session.client
     try:
-        apps = [serialize_app(a) for a in client.list_oauth_apps()]
-        orgs = [serialize_org(o) for o in client.list_organizations()]
-        social_all = [serialize_social(s) for s in client.list_social_links()]
-        social = [s for s in social_all if s["linked"]]
+        games = [serialize_drop_game(g) for g in client.list_drop_game_links()]
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     except Exception as exc:
@@ -100,47 +90,22 @@ def list_connections(session_id: str, q: str = ""):
 
     query = q.strip().lower()
     if query:
+        games = [
+            g
+            for g in games
+            if query in g["name"].lower()
+            or query in g["client_id"].lower()
+            or query == g["game_id"].lower()
+        ]
 
-        def match_item(item: dict) -> bool:
-            name = str(item.get("name", "")).lower()
-            item_id = str(item.get("id", "")).lower()
-            return query in name or query == item_id or query in item_id
-
-        apps = [a for a in apps if match_item(a)]
-        orgs = [o for o in orgs if match_item(o)]
-        social = [s for s in social if match_item(s)]
-
-    return {
-        "apps": apps,
-        "organizations": orgs,
-        "social": social,
-        "proxy": session.proxy_status(),
-    }
+    return {"games": games, "proxy": session.proxy_status()}
 
 
 @app.post("/api/disconnect")
 def disconnect(body: DisconnectRequest):
     session = _require_session(body.session_id)
-    client = session.client
-    user_id = session.user_id
     try:
-        if body.kind == "app":
-            client.unlink_oauth_app(body.item_id)
-        elif body.kind == "social":
-            client.unlink_social(body.item_id, user_id)
-        elif body.kind == "org":
-            orgs = client.list_organizations()
-            org = next((o for o in orgs if o.org_id == body.item_id), None)
-            if not org:
-                raise HTTPException(status_code=404, detail="Организация не найдена.")
-            if not org.can_leave:
-                raise HTTPException(
-                    status_code=403,
-                    detail=f"Нельзя выйти из «{org.name}» (роль: {org.role}).",
-                )
-            client.leave_organization(body.item_id, user_id)
-        else:
-            raise HTTPException(status_code=400, detail="Неизвестный тип подключения.")
+        session.client.unlink_drop_game(body.client_id)
     except HTTPException:
         raise
     except PermissionError as exc:

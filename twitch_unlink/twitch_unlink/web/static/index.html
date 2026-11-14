@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Twitch Unlink</title>
+    <title>Twitch Drops — отвязка игр</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -17,10 +17,12 @@
     <main class="shell">
       <header class="hero">
         <div class="hero__brand">
-          <div class="logo" aria-hidden="true"></div>
+          <div class="logo logo--drops" aria-hidden="true"></div>
           <div>
-            <h1>Twitch Unlink</h1>
-            <p class="subtitle">Отвязка компаний и подключений · вход по токену</p>
+            <h1>Drops — отвязка игр</h1>
+            <p class="subtitle">
+              Как в <strong>Инвентаре Drops</strong>: Standoff 2 и другие игры · только привязки к играм
+            </p>
           </div>
         </div>
         <div id="userChip" class="user-chip hidden" aria-live="polite">
@@ -32,7 +34,7 @@
       <section id="loginPanel" class="panel panel--login">
         <h2>Вход</h2>
         <p class="hint">
-          Вставьте OAuth-токен или строку <code>login:password:token</code> — будет использован только токен.
+          OAuth-токен Twitch или строка <code>login:password:token</code> (используется только токен).
         </p>
         <label class="field">
           <span>OAuth-токен</span>
@@ -43,7 +45,7 @@
           <textarea
             id="proxyInput"
             rows="5"
-            placeholder="http://user:pass@host:port&#10;host:port:user:pass&#10;socks5://host:port"
+            placeholder="http://user:pass@host:port&#10;host:port:user:pass"
           ></textarea>
         </label>
         <div class="field field--inline">
@@ -51,7 +53,7 @@
             <span>Смена прокси (сек)</span>
             <input id="proxyInterval" type="number" min="10" max="600" value="60" />
           </label>
-          <p class="hint hint--sm">По умолчанию новый прокси каждые <strong>60</strong> секунд.</p>
+          <p class="hint hint--sm">Следующий прокси каждые <strong>60</strong> секунд.</p>
         </div>
         <button id="loginBtn" type="button" class="btn btn--primary">Подключиться</button>
         <p id="loginError" class="error hidden" role="alert"></p>
@@ -71,34 +73,29 @@
             <div class="proxy-widget__meta">Следующая смена через <strong id="proxyCountdown">—</strong> с</div>
           </div>
           <div class="toolbar__actions">
-            <input id="searchInput" type="search" placeholder="Фильтр по названию или ID…" />
+            <input id="searchInput" type="search" placeholder="Найти игру (Standoff 2…) или client_id…" />
             <button id="refreshBtn" type="button" class="btn btn--ghost">Обновить</button>
             <button id="logoutBtn" type="button" class="btn btn--danger">Выход</button>
           </div>
         </div>
 
-        <div class="tabs" role="tablist">
-          <button class="tab tab--active" data-tab="apps" role="tab" aria-selected="true">Компании / приложения</button>
-          <button class="tab" data-tab="social" role="tab">Соцсети</button>
-          <button class="tab" data-tab="orgs" role="tab">Организации</button>
+        <div class="panel panel--info">
+          <p class="hint">
+            Показаны игры с активной привязкой аккаунта для <strong>Twitch Drops</strong> (то же подключение, что в
+            настройках «Управление подключениями» на странице инвентаря).
+          </p>
         </div>
 
         <div id="manualPanel" class="panel panel--manual">
           <label class="field field--inline-manual">
-            <span>Отвязать вручную (ID)</span>
-            <input id="manualId" type="text" placeholder="client_id или platform_id" />
+            <span>Вручную: client_id игры</span>
+            <input id="manualId" type="text" placeholder="OAuth Client ID издателя игры" />
           </label>
-          <select id="manualKind">
-            <option value="app">Приложение</option>
-            <option value="social">Соцсеть</option>
-            <option value="org">Организация</option>
-          </select>
-          <button id="manualBtn" type="button" class="btn btn--secondary">Отвязать</button>
+          <button id="manualBtn" type="button" class="btn btn--secondary">Отвязать по ID</button>
         </div>
 
-        <div id="cardsApps" class="cards" role="tabpanel"></div>
-        <div id="cardsSocial" class="cards hidden" role="tabpanel"></div>
-        <div id="cardsOrgs" class="cards hidden" role="tabpanel"></div>
+        <h2 class="section-title">Привязанные игры</h2>
+        <div id="cardsGames" class="cards" role="list"></div>
         <p id="workspaceError" class="error hidden" role="alert"></p>
       </section>
     </main>

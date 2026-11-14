@@ -5,27 +5,13 @@ import getpass
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Protocol, Sequence, TypeVar
+from typing import Callable, Sequence, TypeVar
 
 import requests
 
-from twitch_unlink.client import (
-    OAuthApp,
-    Organization,
-    SocialLink,
-    TokenInfo,
-    TwitchUnlinkClient,
-)
+from twitch_unlink.client import DropGameLink, TokenInfo, TwitchUnlinkClient
 
 T = TypeVar("T")
-
-
-class ConnectionItem(Protocol):
-    @property
-    def key(self) -> str: ...
-
-    @property
-    def name(self) -> str: ...
 
 
 def _fmt_dt(dt: datetime | None) -> str:
@@ -34,64 +20,35 @@ def _fmt_dt(dt: datetime | None) -> str:
     return dt.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
-def _print_apps(apps: Sequence[OAuthApp]) -> None:
-    print("\n=== OAuth-приложения (Other Connections) ===")
-    if not apps:
-        print("Список пуст.")
+def _print_drop_games(games: Sequence[DropGameLink]) -> None:
+    print("\n=== Игры Twitch Drops (привязанные аккаунты) ===")
+    if not games:
+        print("Нет активных привязок. Укажите client_id вручную для отвязки.")
         return
-    for i, app in enumerate(apps, start=1):
-        scopes = ", ".join(app.scopes) if app.scopes else "—"
-        print(f"{i:>3}. {app.name}")
-        print(f"      client_id: {app.client_id}")
-        print(f"      подключено: {_fmt_dt(app.created_at)}")
-        print(f"      scopes: {scopes}")
+    for i, g in enumerate(games, start=1):
+        flag = " [в инвентаре]" if g.in_progress else ""
+        print(f"{i:>3}. {g.name}{flag}")
+        print(f"      client_id: {g.client_id}")
+        if g.campaign_name:
+            print(f"      кампания: {g.campaign_name}")
+        print(f"      привязано: {_fmt_dt(g.linked_at)}")
 
 
-def _print_orgs(orgs: Sequence[Organization]) -> None:
-    print("\n=== Организации (Developer Organizations) ===")
-    if not orgs:
-        print("Список пуст.")
-        return
-    for i, org in enumerate(orgs, start=1):
-        leave = "можно выйти" if org.can_leave else "выход недоступен"
-        print(f"{i:>3}. {org.name}")
-        print(f"      id: {org.org_id}")
-        print(f"      роль: {org.role} ({leave})")
-        print(f"      в организации с: {_fmt_dt(org.joined_at)}")
-
-
-def _print_social(links: Sequence[SocialLink]) -> None:
-    print("\n=== Социальные аккаунты ===")
-    linked = [link for link in links if link.linked]
-    if not linked:
-        print("Нет активных привязок.")
-        return
-    for i, link in enumerate(linked, start=1):
-        print(f"{i:>3}. {link.label} — {link.detail or 'подключено'}")
-
-
-def _match_items(
-    items: Sequence[T],
-    query: str,
-    *,
-    key_fn: Callable[[T], str],
-    name_fn: Callable[[T], str],
-) -> list[T]:
+def _match_items(items: Sequence[T], query: str, name_fn: Callable[[T], str], key_fn: Callable[[T], str]) -> list[T]:
     q = query.strip().lower()
     if not q:
         return []
     exact = [i for i in items if key_fn(i).lower() == q or name_fn(i).lower() == q]
     if exact:
         return exact
-    partial = [i for i in items if q in name_fn(i).lower() or q in key_fn(i).lower()]
-    return partial
+    return [i for i in items if q in name_fn(i).lower() or q in key_fn(i).lower()]
 
 
-def _pick_from_list(items: Sequence[T], label: str, name_fn: Callable[[T], str]) -> T | None:
+def _pick_from_list(items: Sequence[T], label: str, name_fn: Callable[[T], str], key_fn: Callable[[T], str]) -> T | None:
     if not items:
         print("Список пуст.")
         return None
-    print(f"\nВыберите {label} (номер из списка) или введите название / ID вручную.")
+    print(f"\nВыберите {label} (номер) или введите название / client_id.")
     print("Пустая строка — отмена.")
     choice = input("> ").strip()
     if not choice:
@@ -102,19 +59,14 @@ def _pick_from_list(items: Sequence[T], label: str, name_fn: Callable[[T], str])
             return items[idx - 1]
         print("Неверный номер.")
         return None
-    matched = _match_items(
-        items,
-        choice,
-        key_fn=lambda x: str(getattr(x, "key")),
-        name_fn=name_fn,
-    )
+    matched = _match_items(items, choice, name_fn, key_fn)
     if not matched:
         print("Совпадений не найдено.")
         return None
     if len(matched) > 1:
-        print("Найдено несколько совпадений, уточните запрос:")
+        print("Несколько совпадений:")
         for m in matched:
-            print(f"  - {name_fn(m)} ({getattr(m, 'key')})")
+            print(f"  - {name_fn(m)} ({key_fn(m)})")
         return None
     return matched[0]
 
@@ -126,9 +78,8 @@ def _resolve_token(args: argparse.Namespace) -> str:
         content = Path(args.token_file).read_text(encoding="utf-8")
         for line in content.splitlines():
             stripped = line.strip()
-            if not stripped or stripped.startswith("#"):
-                continue
-            return TwitchUnlinkClient.parse_credentials_line(stripped)
+            if stripped and not stripped.startswith("#"):
+                return TwitchUnlinkClient.parse_credentials_line(stripped)
         raise ValueError(f"В файле {args.token_file} нет токена.")
     import os
 
@@ -136,178 +87,95 @@ def _resolve_token(args: argparse.Namespace) -> str:
     if env_token:
         return TwitchUnlinkClient.normalize_token(env_token)
     if args.non_interactive:
-        raise ValueError("Укажите --token, --token-file или переменную TWITCH_TOKEN.")
-    print("Введите OAuth-токен Twitch (можно строку login:password:token — будет использован только токен).")
+        raise ValueError("Укажите --token, --token-file или TWITCH_TOKEN.")
+    print("OAuth-токен (можно login:password:token — берётся только токен).")
     raw = getpass.getpass("Токен: ")
     return TwitchUnlinkClient.normalize_token(raw)
 
 
-def _run_disconnect_apps(client: TwitchUnlinkClient, args: argparse.Namespace) -> None:
-    apps = client.list_oauth_apps()
-    _print_apps(apps)
-    if args.list_only:
-        return
-    target_id = args.id or args.name
-    if target_id:
-        matched = _match_items(
-            apps,
-            target_id,
-            key_fn=lambda a: a.client_id,
-            name_fn=lambda a: a.name,
-        )
-        if not matched:
-            raise SystemExit(f"Приложение не найдено: {target_id}")
-        if len(matched) > 1:
-            raise SystemExit("Найдено несколько приложений, уточните --id или --name.")
-        app = matched[0]
-    elif args.non_interactive:
-        raise SystemExit("Укажите --id или --name для отвязки в неинтерактивном режиме.")
-    else:
-        app = _pick_from_list(apps, "приложение", lambda a: a.name)
-        if not app:
-            return
-
-    if not args.yes:
-        confirm = input(f"Отвязать «{app.name}» ({app.client_id})? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes", "д", "да"):
-            print("Отменено.")
-            return
-    client.unlink_oauth_app(app.client_id)
-    print(f"Готово: «{app.name}» отвязано.")
-
-
-def _run_disconnect_orgs(client: TwitchUnlinkClient, token: TokenInfo, args: argparse.Namespace) -> None:
-    orgs = client.list_organizations()
-    _print_orgs(orgs)
-    if args.list_only:
-        return
-    target_id = args.id or args.name
-    if target_id:
-        matched = _match_items(
-            orgs,
-            target_id,
-            key_fn=lambda o: o.org_id,
-            name_fn=lambda o: o.name,
-        )
-        if not matched:
-            raise SystemExit(f"Организация не найдена: {target_id}")
-        org = matched[0]
-    elif args.non_interactive:
-        raise SystemExit("Укажите --id или --name для выхода в неинтерактивном режиме.")
-    else:
-        org = _pick_from_list(orgs, "организацию", lambda o: o.name)
-        if not org:
-            return
-    if not org.can_leave:
-        raise SystemExit(f"Выход из «{org.name}» недоступен для вашей роли ({org.role}).")
-
-    if not args.yes:
-        confirm = input(f"Покинуть организацию «{org.name}»? [y/N] ").strip().lower()
-        if confirm not in ("y", "yes", "д", "да"):
-            print("Отменено.")
-            return
-    client.leave_organization(org.org_id, token.user_id)
-    print(f"Готово: вы вышли из «{org.name}».")
-
-
-def _run_disconnect_social(client: TwitchUnlinkClient, token: TokenInfo, args: argparse.Namespace) -> None:
-    links = client.list_social_links()
-    linked = [link for link in links if link.linked]
-    _print_social(links)
+def _run_drops(client: TwitchUnlinkClient, args: argparse.Namespace) -> None:
+    games = client.list_drop_game_links()
+    _print_drop_games(games)
     if args.list_only:
         return
     target = args.id or args.name
     if target:
         matched = _match_items(
-            linked,
+            games,
             target,
-            key_fn=lambda l: l.platform_id,
-            name_fn=lambda l: l.label,
+            name_fn=lambda g: g.name,
+            key_fn=lambda g: g.client_id,
         )
         if not matched:
-            raise SystemExit(f"Привязка не найдена или не активна: {target}")
-        link = matched[0]
+            if args.id or (target.isalnum() and len(target) > 8):
+                game = DropGameLink(
+                    game_id=target,
+                    name=target,
+                    client_id=target,
+                    campaign_name=None,
+                    linked_at=None,
+                    in_progress=False,
+                )
+            else:
+                raise SystemExit(f"Игра не найдена: {target}")
+        else:
+            if len(matched) > 1:
+                raise SystemExit("Уточните --id или --name")
+            game = matched[0]
     elif args.non_interactive:
-        raise SystemExit("Укажите --id или --name платформы.")
+        raise SystemExit("Укажите --id (client_id) или --name для отвязки.")
     else:
-        link = _pick_from_list(linked, "платформу", lambda l: l.label)
-        if not link:
+        picked = _pick_from_list(
+            games,
+            "игру",
+            lambda g: g.name,
+            lambda g: g.client_id,
+        )
+        if not picked:
             return
+        game = picked
 
     if not args.yes:
-        confirm = input(f"Отвязать {link.label}? [y/N] ").strip().lower()
+        confirm = input(f"Отвязать «{game.name}» ({game.client_id})? [y/N] ").strip().lower()
         if confirm not in ("y", "yes", "д", "да"):
             print("Отменено.")
             return
-    client.unlink_social(link.platform_id, token.user_id)
-    print(f"Готово: {link.label} отвязан.")
+    client.unlink_drop_game(game.client_id)
+    print(f"Готово: «{game.name}» отвязана от Drops.")
 
 
-def _run_interactive(client: TwitchUnlinkClient, token: TokenInfo) -> None:
+def _run_interactive(client: TwitchUnlinkClient) -> None:
     while True:
-        print("\n--- Меню ---")
-        print("1 — Список и отвязка OAuth-приложений (компании / Other Connections)")
-        print("2 — Список и отвязка социальных аккаунтов")
-        print("3 — Список и выход из организаций")
-        print("4 — Показать всё")
+        print("\n--- Drops: отвязка игр ---")
+        print("1 — Список привязанных игр и отвязка")
+        print("2 — Только список")
         print("0 — Выход")
         choice = input("> ").strip()
         if choice == "0":
             return
         if choice == "1":
             ns = argparse.Namespace(list_only=False, id=None, name=None, yes=False, non_interactive=False)
-            _run_disconnect_apps(client, ns)
+            _run_drops(client, ns)
         elif choice == "2":
-            ns = argparse.Namespace(list_only=False, id=None, name=None, yes=False, non_interactive=False)
-            _run_disconnect_social(client, token, ns)
-        elif choice == "3":
-            ns = argparse.Namespace(list_only=False, id=None, name=None, yes=False, non_interactive=False)
-            _run_disconnect_orgs(client, token, ns)
-        elif choice == "4":
-            _print_apps(client.list_oauth_apps())
-            _print_social(client.list_social_links())
-            _print_orgs(client.list_organizations())
+            _print_drop_games(client.list_drop_game_links())
         else:
             print("Неизвестный пункт.")
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Просмотр и отвязка подключений Twitch по OAuth-токену.",
+        description="Отвязка игровых аккаунтов Twitch Drops (Standoff 2 и др.) по OAuth-токену.",
     )
-    parser.add_argument(
-        "--token",
-        help="OAuth-токен (или login:password:token — будет взят только токен).",
-    )
-    parser.add_argument(
-        "--token-file",
-        help="Файл с токеном или строкой login:password:token (первая непустая строка).",
-    )
-    parser.add_argument(
-        "--client-id",
-        default=None,
-        help=f"Client-Id для GQL (по умолчанию публичный ID сайта Twitch).",
-    )
+    parser.add_argument("--token", help="OAuth-токен или login:password:token")
+    parser.add_argument("--token-file", help="Файл с токеном")
+    parser.add_argument("--client-id", default=None, help="Client-Id для GQL")
     sub = parser.add_subparsers(dest="command")
 
-    apps = sub.add_parser("apps", help="OAuth-приложения (Other Connections)")
-    apps.add_argument("--list", dest="list_only", action="store_true", help="Только список")
-    apps.add_argument("--id", help="client_id приложения")
-    apps.add_argument("--name", help="название приложения (частичное совпадение)")
-    apps.add_argument("--yes", "-y", action="store_true", help="Без подтверждения")
-
-    social = sub.add_parser("social", help="Социальные привязки (Steam, Amazon, …)")
-    social.add_argument("--list", dest="list_only", action="store_true")
-    social.add_argument("--id", help="идентификатор платформы (steam, amazon, …)")
-    social.add_argument("--name", help="название платформы")
-    social.add_argument("--yes", "-y", action="store_true")
-
-    orgs = sub.add_parser("orgs", help="Организации разработчика Twitch")
-    orgs.add_argument("--list", dest="list_only", action="store_true")
-    orgs.add_argument("--id", help="id организации")
-    orgs.add_argument("--name", help="название организации")
-    orgs.add_argument("--yes", "-y", action="store_true")
-
+    drops = sub.add_parser("drops", help="Список и отвязка игр Drops")
+    drops.add_argument("--list", dest="list_only", action="store_true")
+    drops.add_argument("--id", help="client_id игры")
+    drops.add_argument("--name", help="название игры (например Standoff 2)")
+    drops.add_argument("--yes", "-y", action="store_true")
     sub.add_parser("interactive", help="Интерактивное меню (по умолчанию)")
     return parser
 
@@ -323,10 +191,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка токена: {exc}", file=sys.stderr)
         return 2
 
-    client_id = args.client_id
     from twitch_unlink.client import DEFAULT_CLIENT_ID
 
-    client = TwitchUnlinkClient(token, client_id=client_id or DEFAULT_CLIENT_ID)
+    client = TwitchUnlinkClient(token, client_id=args.client_id or DEFAULT_CLIENT_ID)
 
     try:
         token_info = client.validate()
@@ -342,13 +209,9 @@ def main(argv: list[str] | None = None) -> int:
     command = args.command or "interactive"
     try:
         if command == "interactive":
-            _run_interactive(client, token_info)
-        elif command == "apps":
-            _run_disconnect_apps(client, args)
-        elif command == "social":
-            _run_disconnect_social(client, token_info, args)
-        elif command == "orgs":
-            _run_disconnect_orgs(client, token_info, args)
+            _run_interactive(client)
+        elif command == "drops":
+            _run_drops(client, args)
         else:
             parser.print_help()
             return 2

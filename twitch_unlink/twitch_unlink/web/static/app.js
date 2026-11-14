@@ -3,6 +3,7 @@ const state = {
   proxyInterval: 60,
   pollTimer: null,
   countdownTimer: null,
+  searchDebounce: null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -28,14 +29,15 @@ async function api(path, options = {}) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data.detail || data.message || res.statusText);
+    const detail = data.detail;
+    throw new Error(Array.isArray(detail) ? detail.map((d) => d.msg).join(", ") : detail || res.statusText);
   }
   return data;
 }
 
 function updateProxyUI(proxy) {
   const enabled = proxy && proxy.enabled;
-  $("proxyLabel").textContent = enabled ? proxy.current || "—" : "Без прокси (прямое соединение)";
+  $("proxyLabel").textContent = enabled ? proxy.current || "—" : "Без прокси";
   $("proxyBadge").textContent = enabled ? `${proxy.index + 1}/${proxy.total}` : "—";
   const remain = enabled ? proxy.seconds_until_rotation : 0;
   const interval = enabled ? proxy.interval_sec : state.proxyInterval || 60;
@@ -43,41 +45,6 @@ function updateProxyUI(proxy) {
   const pct = enabled && interval > 0 ? (remain / interval) * 100 : 0;
   $("proxyBar").style.width = `${Math.max(0, Math.min(100, pct))}%`;
   state.proxyInterval = interval;
-}
-
-function renderCards(containerId, items, kind) {
-  const root = $(containerId);
-  root.innerHTML = "";
-  if (!items.length) {
-    root.innerHTML = '<p class="empty">Ничего не найдено.</p>';
-    return;
-  }
-  for (const item of items) {
-    const card = document.createElement("article");
-    card.className = "card";
-    const extra =
-      kind === "app"
-        ? (item.scopes || []).map((s) => `<span class="tag">${escapeHtml(s)}</span>`).join("")
-        : kind === "org"
-          ? `<span class="tag">${escapeHtml(item.role)}</span>`
-          : `<span class="tag">${escapeHtml(item.detail || "")}</span>`;
-    const disabled = kind === "org" && !item.can_leave;
-    card.innerHTML = `
-      <h3 class="card__title">${escapeHtml(item.name)}</h3>
-      <div class="card__meta">${escapeHtml(item.id)}</div>
-      <div class="card__tags">${extra}</div>
-      <div class="card__actions">
-        <button type="button" class="btn btn--danger btn--sm" ${disabled ? "disabled" : ""} data-id="${escapeHtml(item.id)}" data-kind="${kind}">
-          ${kind === "org" ? "Выйти" : "Отвязать"}
-        </button>
-      </div>
-    `;
-    const btn = card.querySelector("button");
-    if (!disabled) {
-      btn.addEventListener("click", () => disconnect(item.id, kind, item.name));
-    }
-    root.appendChild(card);
-  }
 }
 
 function escapeHtml(s) {
@@ -88,15 +55,46 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
-async function refreshConnections() {
+function renderGames(games) {
+  const root = $("cardsGames");
+  root.innerHTML = "";
+  if (!games.length) {
+    root.innerHTML =
+      '<p class="empty">Нет привязанных игр Drops. Если игра всё ещё в настройках Twitch — укажите client_id вручную ниже.</p>';
+    return;
+  }
+  for (const g of games) {
+    const card = document.createElement("article");
+    card.className = "card";
+    const badge = g.in_progress
+      ? '<span class="tag tag--live">В инвентаре</span>'
+      : '<span class="tag">Привязка</span>';
+    const camp = g.campaign_name
+      ? `<div class="card__meta">Кампания: ${escapeHtml(g.campaign_name)}</div>`
+      : "";
+    card.innerHTML = `
+      <h3 class="card__title">${escapeHtml(g.name)}</h3>
+      ${camp}
+      <div class="card__meta">client_id: ${escapeHtml(g.client_id)}</div>
+      <div class="card__tags">${badge}</div>
+      <div class="card__actions">
+        <button type="button" class="btn btn--danger btn--sm" data-id="${escapeHtml(g.client_id)}">
+          Отвязать игру
+        </button>
+      </div>
+    `;
+    card.querySelector("button").addEventListener("click", () => disconnect(g.client_id, g.name));
+    root.appendChild(card);
+  }
+}
+
+async function refreshGames() {
   if (!state.sessionId) return;
   const q = $("searchInput").value.trim();
-  const url = `/api/connections/${state.sessionId}${q ? `?q=${encodeURIComponent(q)}` : ""}`;
+  const url = `/api/drop-games/${state.sessionId}${q ? `?q=${encodeURIComponent(q)}` : ""}`;
   try {
     const data = await api(url);
-    renderCards("cardsApps", data.apps, "app");
-    renderCards("cardsSocial", data.social, "social");
-    renderCards("cardsOrgs", data.organizations, "org");
+    renderGames(data.games);
     updateProxyUI(data.proxy);
     hide($("workspaceError"));
   } catch (e) {
@@ -105,18 +103,17 @@ async function refreshConnections() {
   }
 }
 
-async function disconnect(itemId, kind, label) {
+async function disconnect(clientId, label) {
   if (!state.sessionId) return;
-  const action = kind === "org" ? "выйти из" : "отвязать";
-  if (!confirm(`${action} «${label}»?`)) return;
+  if (!confirm(`Отвязать игру «${label}» от Twitch Drops?`)) return;
   try {
     const data = await api("/api/disconnect", {
       method: "POST",
-      body: JSON.stringify({ session_id: state.sessionId, kind, item_id: itemId }),
+      body: JSON.stringify({ session_id: state.sessionId, client_id: clientId }),
     });
     updateProxyUI(data.proxy);
-    toast("Готово");
-    await refreshConnections();
+    toast("Игра отвязана");
+    await refreshGames();
   } catch (e) {
     toast(e.message);
   }
@@ -124,14 +121,14 @@ async function disconnect(itemId, kind, label) {
 
 function startPolling() {
   stopPolling();
-  state.pollTimer = setInterval(refreshConnections, 5000);
+  state.pollTimer = setInterval(refreshGames, 8000);
   state.countdownTimer = setInterval(async () => {
     if (!state.sessionId) return;
     try {
       const data = await api(`/api/session/${state.sessionId}`);
       updateProxyUI(data.proxy);
     } catch {
-      /* ignore transient */
+      /* ignore */
     }
   }, 1000);
 }
@@ -158,7 +155,7 @@ async function login() {
     hide($("loginPanel"));
     show($("workspace"));
     updateProxyUI(data.proxy);
-    await refreshConnections();
+    await refreshGames();
     startPolling();
     toast(`Вошли как ${data.login}`);
   } catch (e) {
@@ -185,39 +182,18 @@ async function logout() {
   show($("loginPanel"));
 }
 
-function setupTabs() {
-  document.querySelectorAll(".tab").forEach((tab) => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach((t) => {
-        t.classList.remove("tab--active");
-        t.setAttribute("aria-selected", "false");
-      });
-      tab.classList.add("tab--active");
-      tab.setAttribute("aria-selected", "true");
-      const name = tab.dataset.tab;
-      hide($("cardsApps"));
-      hide($("cardsSocial"));
-      hide($("cardsOrgs"));
-      show($({ apps: "cardsApps", social: "cardsSocial", orgs: "cardsOrgs" }[name]));
-    });
-  });
-}
-
 $("loginBtn").addEventListener("click", login);
-$("refreshBtn").addEventListener("click", refreshConnections);
+$("refreshBtn").addEventListener("click", refreshGames);
 $("logoutBtn").addEventListener("click", logout);
 $("searchInput").addEventListener("input", () => {
   clearTimeout(state.searchDebounce);
-  state.searchDebounce = setTimeout(refreshConnections, 280);
+  state.searchDebounce = setTimeout(refreshGames, 280);
 });
 $("manualBtn").addEventListener("click", () => {
   const id = $("manualId").value.trim();
-  const kind = $("manualKind").value;
   if (!id) {
-    toast("Укажите ID");
+    toast("Укажите client_id");
     return;
   }
-  disconnect(id, kind, id);
+  disconnect(id, id);
 });
-
-setupTabs();

@@ -47,6 +47,22 @@ class Organization:
 
 
 @dataclass(frozen=True)
+class DropGameLink:
+    """Привязка игрового аккаунта для Twitch Drops (например Standoff 2)."""
+
+    game_id: str
+    name: str
+    client_id: str
+    campaign_name: str | None
+    linked_at: datetime | None
+    in_progress: bool
+
+    @property
+    def key(self) -> str:
+        return self.client_id or self.game_id
+
+
+@dataclass(frozen=True)
 class SocialLink:
     platform_id: str
     label: str
@@ -277,6 +293,10 @@ class TwitchUnlinkClient:
         return links
 
     def unlink_oauth_app(self, client_id: str) -> None:
+        self.unlink_drop_game(client_id)
+
+    def unlink_drop_game(self, client_id: str) -> None:
+        """Отвязать игровой аккаунт Drops (OAuth client ID игры / издателя)."""
         mutation = """
         mutation DeleteOauthApp($id: ID!) {
           deleteOauthApp(input: { id: $id }) {
@@ -285,6 +305,112 @@ class TwitchUnlinkClient:
         }
         """
         self.gql(mutation, {"id": client_id})
+
+    def list_drop_game_links(self) -> list[DropGameLink]:
+        query = """
+        query LinkedDropGames {
+          currentUser {
+            clientAuthorizations {
+              clientID
+              clientName
+              createdAt
+            }
+            inventory {
+              dropCampaignsInProgress {
+                id
+                name
+                self { isAccountConnected }
+                game {
+                  id
+                  name
+                  displayName
+                  dropAccountLink { clientID updatedAt }
+                }
+              }
+            }
+            dropCampaigns {
+              id
+              name
+              self { isAccountConnected }
+              game {
+                id
+                name
+                displayName
+                dropAccountLink { clientID updatedAt }
+              }
+            }
+          }
+        }
+        """
+        data = self.gql(query)
+        user = data.get("currentUser")
+        if not user:
+            raise PermissionError("Не удалось получить currentUser — проверьте токен.")
+
+        campaigns: list[dict[str, Any]] = []
+        inventory = user.get("inventory") or {}
+        campaigns.extend(inventory.get("dropCampaignsInProgress") or [])
+        campaigns.extend(user.get("dropCampaigns") or [])
+
+        drop_client_ids: set[str] = set()
+        for camp in campaigns:
+            game = camp.get("game") or {}
+            link = game.get("dropAccountLink") or {}
+            client_id = link.get("clientID")
+            if client_id:
+                drop_client_ids.add(str(client_id))
+
+        progress_ids = {
+            str(c.get("id"))
+            for c in (inventory.get("dropCampaignsInProgress") or [])
+            if c.get("id")
+        }
+
+        by_client: dict[str, DropGameLink] = {}
+
+        for camp in campaigns:
+            self_edge = camp.get("self") or {}
+            if not self_edge.get("isAccountConnected"):
+                continue
+            game = camp.get("game") or {}
+            game_id = str(game.get("id") or "")
+            if not game_id:
+                continue
+            link = game.get("dropAccountLink") or {}
+            client_id = str(link.get("clientID") or "")
+            if not client_id:
+                continue
+            name = str(game.get("displayName") or game.get("name") or "(игра)")
+            entry = DropGameLink(
+                game_id=game_id,
+                name=name,
+                client_id=client_id,
+                campaign_name=str(camp.get("name") or ""),
+                linked_at=_parse_time(link.get("updatedAt")),
+                in_progress=str(camp.get("id") or "") in progress_ids,
+            )
+            existing = by_client.get(client_id)
+            if existing is None or entry.in_progress:
+                by_client[client_id] = entry
+
+        for auth in user.get("clientAuthorizations") or []:
+            client_id = str(auth.get("clientID") or "")
+            if not client_id or client_id not in drop_client_ids:
+                continue
+            if client_id in by_client:
+                continue
+            by_client[client_id] = DropGameLink(
+                game_id=client_id,
+                name=str(auth.get("clientName") or "(игра)"),
+                client_id=client_id,
+                campaign_name=None,
+                linked_at=_parse_time(auth.get("createdAt")),
+                in_progress=False,
+            )
+
+        links = list(by_client.values())
+        links.sort(key=lambda g: g.name.lower())
+        return links
 
     def leave_organization(self, organization_id: str, user_id: str) -> None:
         mutation = """

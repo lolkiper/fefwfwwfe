@@ -1,12 +1,9 @@
-# Twitch Unlink
+# Twitch Drops — отвязка игр
 
-Консольная утилита для **просмотра и отвязки подключений** аккаунта Twitch:
+Утилита для **отвязки игровых аккаунтов Twitch Drops** (как Standoff 2 на странице **Инвентарь Drops** → «управлять подключениями»).  
+Не трогает прочие OAuth-приложения, соцсети и организации — **только игры с Drops**.
 
-- **OAuth-приложения** («Other Connections» / сторонние компании)
-- **социальные аккаунты** (Steam, Amazon, Riot и др.)
-- **организации разработчика** (выход из организации)
-
-Вход выполняется **только по OAuth-токену** (логин и пароль не используются). Поддерживается строка вида `login:password:token` — из неё берётся только последняя часть.
+Вход: **OAuth-токен** (`login:password:token` — используется только токен).
 
 ## Установка
 
@@ -15,59 +12,36 @@ cd twitch_unlink
 pip install -r requirements.txt
 ```
 
-## Использование
-
-Интерактивное меню:
+## Веб-интерфейс (рекомендуется)
 
 ```bash
-export TWITCH_TOKEN='ваш_токен'
-python -m twitch_unlink
-```
-
-Только список приложений:
-
-```bash
-python -m twitch_unlink apps --list --token 'ваш_токен'
-```
-
-Отвязать приложение по имени:
-
-```bash
-python -m twitch_unlink apps --name "Streamlabs" --yes --token 'ваш_токен'
-```
-
-Файл с учётными данными (первая строка `login:password:token`):
-
-```bash
-python -m twitch_unlink apps --list --token-file accounts.txt
-```
-
-Команды: `apps`, `social`, `orgs`, `interactive`.
-
-## Веб‑программа (интерфейс + ротация прокси)
-
-Графический интерфейс в стиле Twitch: списки подключений, отвязка в один клик, фильтр и ручной ввод ID.
-
-**Ротация прокси:** при указании нескольких прокси трафик к Twitch переключается на следующий прокси **каждые 60 секунд** (интервал можно изменить на экране входа, 10–600 с).
-
-```bash
-cd twitch_unlink
-pip install -r requirements.txt
 python3 -m twitch_unlink web
 ```
 
-Откройте в браузере: **http://127.0.0.1:8765**
+Откройте **http://127.0.0.1:8765**
 
-Форматы прокси в текстовом поле (по одному на строку):
+- список привязанных игр из кампаний Drops и инвентаря;
+- отвязка по кнопке или вручную по `client_id`;
+- **ротация прокси** каждые 60 с (интервал настраивается).
 
-- `http://user:pass@host:port`
-- `host:port:user:pass`
-- `socks5://host:port`
+## Консоль
 
-## Откуда взять токен
+```bash
+export TWITCH_TOKEN='…'
+python3 -m twitch_unlink drops --list
+python3 -m twitch_unlink drops --name "Standoff" -y
+python3 -m twitch_unlink drops --id '<client_id игры>' -y
+```
 
-Токен — секрет, как пароль. Обычно его получают через OAuth вашего приложения на [dev.twitch.tv](https://dev.twitch.tv) или из сессии браузера (на свой риск). Утилита использует неофициальный GraphQL Twitch, как веб-сайт; для OAuth-приложений применяется мутация `deleteOauthApp`.
+## Как это работает
 
-## Безопасность
+Привязка игры для Drops — это OAuth-подключение **Client ID издателя игры**.  
+Отвязка выполняется через GQL `deleteOauthApp` с этим `client_id` (как «Disconnect» в настройках Twitch).
 
-Не публикуйте токен и не коммитьте файлы с токенами в git.
+Список строится из:
+
+- кампаний в инвентаре (`dropCampaignsInProgress`), где `isAccountConnected`;
+- остальных `dropCampaigns` с активной привязкой;
+- при необходимости — `clientAuthorizations`, если `client_id` совпадает с игрой из Drops.
+
+Токен храните в секрете. Используется неофициальный GQL Twitch.
