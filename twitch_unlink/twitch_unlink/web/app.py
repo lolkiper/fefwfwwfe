@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -10,7 +11,13 @@ from pydantic import BaseModel, Field
 from twitch_unlink.proxy_rotator import parse_proxy_list
 from twitch_unlink.web.session import SessionStore, serialize_drop_game
 
-STATIC_DIR = Path(__file__).resolve().parent / "static"
+def _static_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(getattr(sys, "_MEIPASS")) / "twitch_unlink" / "web" / "static"
+    return Path(__file__).resolve().parent / "static"
+
+
+STATIC_DIR = _static_dir()
 DEFAULT_PROXY_INTERVAL = 60.0
 
 store = SessionStore()
