@@ -21,17 +21,25 @@ jobs:
         run: |
           python -m pip install -r requirements-build.txt
           python -m PyInstaller --noconfirm twitch-drops-unlink.spec
-      - name: Build Inno Setup installer
-        uses: amake/innosetup-action@v2
-        with:
-          path: twitch_unlink/installer/TwitchDropsUnlink.iss
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build setup.exe
+        working-directory: twitch_unlink
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\TwitchDropsUnlink.iss"'
+      - name: Zip portable build
+        shell: pwsh
+        working-directory: twitch_unlink
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Force -Path dist\TwitchDropsUnlink\* `
+            -DestinationPath release\TwitchDropsUnlink-Windows-portable.zip
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: TwitchDropsUnlink-Windows
           path: |
-            twitch_unlink/dist/TwitchDropsUnlink/
-            twitch_unlink/release/*.exe
+            twitch_unlink/release/TwitchDropsUnlink-Setup-*.exe
+            twitch_unlink/release/TwitchDropsUnlink-Windows-portable.zip
 
   linux:
     runs-on: ubuntu-latest
