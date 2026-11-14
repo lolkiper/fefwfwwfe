@@ -19,6 +19,8 @@ def normalize_proxy_line(line: str) -> str | None:
     parts = raw.split(":")
     if len(parts) == 2:
         return f"http://{parts[0]}:{parts[1]}"
+    if raw.lower().startswith(("socks5://", "socks4://", "socks://")):
+        return raw if "://" in raw else f"socks5://{raw}"
     if len(parts) == 4:
         host, port, user, password = parts
         return f"http://{user}:{password}@{host}:{port}"
@@ -83,11 +85,28 @@ class ProxyRotator:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
+    @property
+    def total(self) -> int:
+        with self._lock:
+            return len(self._proxies)
+
     def current(self) -> str | None:
         with self._lock:
             if not self._proxies:
                 return None
             return self._proxies[self._index]
+
+    def advance(self) -> str | None:
+        """Следующий прокси в списке (при сбое текущего)."""
+        with self._lock:
+            if not self._proxies:
+                return None
+            self._index = (self._index + 1) % len(self._proxies)
+            self._rotated_at = time.monotonic()
+            proxy = self._proxies[self._index]
+        if self._on_rotate:
+            self._on_rotate(proxy)
+        return proxy
 
     def status(self) -> ProxyStatus:
         with self._lock:

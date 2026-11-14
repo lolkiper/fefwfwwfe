@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from twitch_unlink.accounts import AccountLine, load_accounts_file
 from twitch_unlink.client import DropGameLink, TwitchUnlinkClient
+from twitch_unlink.errors import format_user_error
 from pathlib import Path
 
 from twitch_unlink.proxy_rotator import ProxyRotator, parse_proxy_list
@@ -90,6 +91,7 @@ class TwitchDropsApp:
         toolbar.pack(fill=tk.X)
         ttk.Button(toolbar, text="Файл аккаунтов…", command=self._pick_accounts).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="Файл прокси…", command=self._pick_proxies).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(toolbar, text="Сброс прокси", command=self._clear_proxies).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(toolbar, text="Обновить игры", command=self._refresh_games).pack(side=tk.LEFT)
         ttk.Label(toolbar, textvariable=self._proxy_countdown, style="Muted.TLabel").pack(side=tk.RIGHT)
 
@@ -170,7 +172,7 @@ class TwitchDropsApp:
                 if on_ok:
                     self._ui_q.put((on_ok, (result,), {}))
             except Exception as exc:  # noqa: BLE001
-                self._ui_q.put((self._show_error, (str(exc),), {}))
+                self._ui_q.put((self._show_error_exc, (exc,), {}))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -186,6 +188,10 @@ class TwitchDropsApp:
     def _show_error(self, message: str) -> None:
         self._status.set(message)
         messagebox.showerror("Ошибка", message)
+
+    def _show_error_exc(self, exc: BaseException) -> None:
+        text = format_user_error(exc)
+        self._show_error(text)
 
     def _pick_accounts(self) -> None:
         path = filedialog.askopenfilename(
@@ -232,6 +238,17 @@ class TwitchDropsApp:
         if self._client:
             self._client.attach_proxy_rotator(self._proxy_rotator)
         self._status.set(f"Прокси: {len(lines)} шт., смена каждые 60 с")
+
+    def _clear_proxies(self) -> None:
+        if self._proxy_rotator:
+            self._proxy_rotator.stop()
+        self._proxy_rotator = None
+        if self._client:
+            self._client.apply_proxy(None)
+        self._proxy_countdown.set("Прокси: отключены (прямое подключение)")
+        self._status.set("Прокси сброшены — используется ваш интернет")
+        if self._active_account:
+            self._on_account_selected()
 
     def _on_proxy_rotate(self, _proxy: str | None) -> None:
         pass

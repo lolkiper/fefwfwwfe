@@ -14,6 +14,8 @@ a = Analysis(
         "twitch_unlink.client",
         "twitch_unlink.proxy_rotator",
         "twitch_unlink.accounts",
+        "twitch_unlink.errors",
+        "socks",
     ],
     hookspath=[],
     hooksconfig={},

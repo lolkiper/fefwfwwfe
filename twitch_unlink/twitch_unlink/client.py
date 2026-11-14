@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
 import requests
 
+from twitch_unlink.errors import ProxyConnectionError
+from twitch_unlink.proxy_rotator import mask_proxy
+
 DEFAULT_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
 GQL_URL = "https://gql.twitch.tv/gql"
 VALIDATE_URL = "https://id.twitch.tv/oauth2/validate"
+# Короткий connect-timeout — быстрее перебирать мёртвые прокси (502).
+REQUEST_TIMEOUT = (6, 25)
 
 
 @dataclass(frozen=True)
@@ -111,6 +117,39 @@ class TwitchUnlinkClient:
         if self._proxy_rotator is not None:
             self.apply_proxy(self._proxy_rotator.current())
 
+    def _max_proxy_attempts(self) -> int:
+        if self._proxy_rotator is not None:
+            return max(1, self._proxy_rotator.total)
+        return 1
+
+    def _with_proxy_retry(self, make_request: Callable[[], requests.Response]) -> requests.Response:
+        last: Exception | None = None
+        attempts = self._max_proxy_attempts()
+        for attempt in range(attempts):
+            self._sync_proxy()
+            try:
+                return make_request()
+            except requests.exceptions.HTTPError:
+                raise
+            except (
+                requests.exceptions.ProxyError,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout,
+            ) as exc:
+                last = exc
+                if attempt + 1 >= attempts:
+                    break
+                if self._proxy_rotator is not None:
+                    self._proxy_rotator.advance()
+                else:
+                    break
+        masked = mask_proxy(self._session.proxies.get("https") if self._session.proxies else None)
+        hint = f" Последний прокси: {masked}." if masked else ""
+        raise ProxyConnectionError(
+            f"Не удалось связаться с Twitch через прокси ({attempts} шт. в списке).{hint} "
+            "Скорее всего прокси мёртвые (502) — обновите файл или нажмите «Сброс прокси»."
+        ) from last
+
     @staticmethod
     def normalize_token(raw: str) -> str:
         value = raw.strip()
@@ -133,8 +172,9 @@ class TwitchUnlinkClient:
         return TwitchUnlinkClient.normalize_token(line)
 
     def validate(self) -> TokenInfo:
-        self._sync_proxy()
-        response = self._session.get(VALIDATE_URL, timeout=30)
+        response = self._with_proxy_retry(
+            lambda: self._session.get(VALIDATE_URL, timeout=REQUEST_TIMEOUT)
+        )
         if response.status_code == 401:
             raise PermissionError("Токен недействителен или истёк.")
         response.raise_for_status()
@@ -162,8 +202,9 @@ class TwitchUnlinkClient:
         if operation_name:
             payload["operationName"] = operation_name
 
-        self._sync_proxy()
-        response = self._session.post(GQL_URL, data=json.dumps(payload), timeout=30)
+        response = self._with_proxy_retry(
+            lambda: self._session.post(GQL_URL, data=json.dumps(payload), timeout=REQUEST_TIMEOUT)
+        )
         response.raise_for_status()
         body = response.json()
 
