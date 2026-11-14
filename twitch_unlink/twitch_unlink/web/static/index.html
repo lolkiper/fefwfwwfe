@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Twitch Drops — отвязка игр</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-glow" aria-hidden="true"></div>
+    <main class="shell">
+      <header class="hero">
+        <div class="hero__brand">
+          <div class="logo logo--drops" aria-hidden="true"></div>
+          <div>
+            <h1>Drops — отвязка игр</h1>
+            <p class="subtitle">
+              Как в <strong>Инвентаре Drops</strong>: Standoff 2 и другие игры · только привязки к играм
+            </p>
+          </div>
+        </div>
+        <div id="userChip" class="user-chip hidden" aria-live="polite">
+          <span class="user-chip__dot"></span>
+          <span id="userLogin">—</span>
+        </div>
+      </header>
+
+      <section id="loginPanel" class="panel panel--login">
+        <h2>Вход</h2>
+        <p class="hint">
+          OAuth-токен Twitch или строка <code>login:password:token</code> (используется только токен).
+        </p>
+        <label class="field">
+          <span>OAuth-токен</span>
+          <input id="tokenInput" type="password" autocomplete="off" placeholder="oauth:…" />
+        </label>
+        <label class="field">
+          <span>Прокси (по одному на строку)</span>
+          <textarea
+            id="proxyInput"
+            rows="5"
+            placeholder="http://user:pass@host:port&#10;host:port:user:pass"
+          ></textarea>
+        </label>
+        <div class="field field--inline">
+          <label>
+            <span>Смена прокси (сек)</span>
+            <input id="proxyInterval" type="number" min="10" max="600" value="60" />
+          </label>
+          <p class="hint hint--sm">Следующий прокси каждые <strong>60</strong> секунд.</p>
+        </div>
+        <button id="loginBtn" type="button" class="btn btn--primary">Подключиться</button>
+        <p id="loginError" class="error hidden" role="alert"></p>
+      </section>
+
+      <section id="workspace" class="workspace hidden">
+        <div class="toolbar">
+          <div class="proxy-widget" id="proxyWidget" aria-live="polite">
+            <div class="proxy-widget__title">Прокси</div>
+            <div class="proxy-widget__row">
+              <span id="proxyLabel">—</span>
+              <span class="badge" id="proxyBadge">0/0</span>
+            </div>
+            <div class="proxy-timer">
+              <div class="proxy-timer__bar" id="proxyBar"></div>
+            </div>
+            <div class="proxy-widget__meta">Следующая смена через <strong id="proxyCountdown">—</strong> с</div>
+          </div>
+          <div class="toolbar__actions">
+            <input id="searchInput" type="search" placeholder="Найти игру (Standoff 2…) или client_id…" />
+            <button id="refreshBtn" type="button" class="btn btn--ghost">Обновить</button>
+            <button id="logoutBtn" type="button" class="btn btn--danger">Выход</button>
+          </div>
+        </div>
+
+        <div class="panel panel--info">
+          <p class="hint">
+            Показаны игры с активной привязкой аккаунта для <strong>Twitch Drops</strong> (то же подключение, что в
+            настройках «Управление подключениями» на странице инвентаря).
+          </p>
+        </div>
+
+        <div id="manualPanel" class="panel panel--manual">
+          <label class="field field--inline-manual">
+            <span>Вручную: client_id игры</span>
+            <input id="manualId" type="text" placeholder="OAuth Client ID издателя игры" />
+          </label>
+          <button id="manualBtn" type="button" class="btn btn--secondary">Отвязать по ID</button>
+        </div>
+
+        <h2 class="section-title">Привязанные игры</h2>
+        <div id="cardsGames" class="cards" role="list"></div>
+        <p id="workspaceError" class="error hidden" role="alert"></p>
+      </section>
+    </main>
+    <div id="toast" class="toast hidden" role="status"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

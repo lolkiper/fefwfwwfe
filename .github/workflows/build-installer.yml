@@ -1,0 +1,58 @@
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - cursor/twitch-unlink-companies-3f6a
+    paths:
+      - twitch_unlink/**
+      - .github/workflows/build-installer.yml
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build portable
+        working-directory: twitch_unlink
+        run: |
+          python -m pip install -r requirements-build.txt
+          python -m PyInstaller --noconfirm twitch-drops-unlink.spec
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build setup.exe
+        working-directory: twitch_unlink
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\TwitchDropsUnlink.iss"'
+      - name: Zip portable build
+        shell: pwsh
+        working-directory: twitch_unlink
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Compress-Archive -Force -Path dist\TwitchDropsUnlink\* `
+            -DestinationPath release\TwitchDropsUnlink-Windows-portable.zip
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: TwitchDropsUnlink-Windows
+          path: |
+            twitch_unlink/release/TwitchDropsUnlink-Setup-*.exe
+            twitch_unlink/release/TwitchDropsUnlink-Windows-portable.zip
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build tarball
+        working-directory: twitch_unlink
+        run: bash scripts/build_linux.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TwitchDropsUnlink-Linux
+          path: twitch_unlink/release/TwitchDropsUnlink-linux-x86_64.tar.gz
