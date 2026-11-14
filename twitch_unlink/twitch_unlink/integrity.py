@@ -56,7 +56,9 @@ class TwitchIntegrity:
             "User-Agent": TWITCH_UA,
         }
 
-    def refresh(self, http: Session, oauth_token: str, timeout: float | tuple[float, float]) -> str:
+    def _refresh_http(
+        self, http: Session, oauth_token: str, timeout: float | tuple[float, float]
+    ) -> str:
         headers = {**self._base_headers(oauth_token), "Content-Type": "application/json"}
         response = http.post(INTEGRITY_URL, headers=headers, data=b"", timeout=timeout)
         response.raise_for_status()
@@ -72,10 +74,46 @@ class TwitchIntegrity:
         self._token = token
         return token
 
-    def ensure_token(self, http: Session, oauth_token: str, timeout: float | tuple[float, float]) -> str:
+    def _refresh_browser(self, oauth_token: str) -> str:
+        from twitch_unlink.integrity_browser import fetch_integrity_via_browser
+
+        token, expires = fetch_integrity_via_browser(
+            oauth_token,
+            client_id=self.client_id,
+            client_version=self.client_version,
+            device_id=self.device_id,
+            session_id=self.session_id,
+        )
+        self._expires_at = expires
+        self._token = token
+        return token
+
+    def refresh(
+        self,
+        http: Session,
+        oauth_token: str,
+        timeout: float | tuple[float, float],
+        *,
+        use_browser: bool = True,
+    ) -> str:
+        if use_browser:
+            try:
+                return self._refresh_browser(oauth_token)
+            except Exception:
+                pass
+        return self._refresh_http(http, oauth_token, timeout)
+
+    def ensure_token(
+        self,
+        http: Session,
+        oauth_token: str,
+        timeout: float | tuple[float, float],
+        *,
+        use_browser: bool = True,
+    ) -> str:
         if self._token and time.time() < self._expires_at - 30:
             return self._token
-        return self.refresh(http, oauth_token, timeout)
+        return self.refresh(http, oauth_token, timeout, use_browser=use_browser)
 
     def gql_headers(self, token: str | None = None) -> dict[str, str]:
         value = token or self._token

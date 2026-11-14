@@ -239,7 +239,9 @@ class TwitchUnlinkClient:
         for attempt in range(2):
             extra_headers: dict[str, str] = {}
             if integrity:
-                token = self._integrity.ensure_token(self._session, self.token, REQUEST_TIMEOUT)
+                token = self._integrity.ensure_token(
+                    self._session, self.token, REQUEST_TIMEOUT, use_browser=True
+                )
                 extra_headers = self._integrity.gql_headers(token)
 
             response = self._with_proxy_retry(

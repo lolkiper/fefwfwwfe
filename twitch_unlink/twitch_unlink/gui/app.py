@@ -361,7 +361,9 @@ class TwitchDropsApp:
         if not self._client:
             messagebox.showinfo("Отвязка", "Нет активного аккаунта.")
             return
-        self._status.set(f"Отвязка «{label}»…")
+        self._status.set(
+            f"Отвязка «{label}»… (может открыться Chrome/Edge на несколько секунд)"
+        )
 
         def work() -> None:
             assert self._client is not None
