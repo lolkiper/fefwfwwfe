@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import sys
-import time
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from twitch_unlink.gql_mutations import DELETE_OAUTH_APP
@@ -14,8 +15,15 @@ KASADA_SCRIPT = (
     "2d206a39-8ed7-437e-a3be-862e0f06eea3/p.js"
 )
 
+STEALTH_INIT = """
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+if (!window.chrome) { window.chrome = { runtime: {} }; }
+"""
+
 _RUN_MUTATION_JS = """
 async (cfg) => {
+  try { localStorage.setItem('auth-token', cfg.oauthToken); } catch (e) {}
+
   const baseHeaders = {
     "Client-Id": cfg.clientId,
     "Authorization": "OAuth " + cfg.oauthToken,
@@ -25,6 +33,17 @@ async (cfg) => {
     "Client-Session-Id": cfg.clientSessionId,
     "Content-Type": "text/plain;charset=UTF-8",
   };
+
+  async function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+
+  async function waitKpsdk(maxMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      if (window.KPSDK) return true;
+      await sleep(200);
+    }
+    return false;
+  }
 
   async function integrityOnce() {
     const resp = await fetch("https://gql.twitch.tv/integrity", {
@@ -68,12 +87,49 @@ async (cfg) => {
     });
   }
 
+  await waitKpsdk(20000);
+  await sleep(cfg.pageWarmupMs || 2000);
+
   let integ;
-  try {
-    integ = await integrityOnce();
-  } catch (e) {
-    integ = await integrityWithKasada();
+  let lastErr;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      if (window.KPSDK) {
+        integ = await new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error("kpsdk-ready timeout")), 25000);
+          document.addEventListener("kpsdk-ready", async () => {
+            try {
+              clearTimeout(t);
+              resolve(await integrityOnce());
+            } catch (e) {
+              clearTimeout(t);
+              reject(e);
+            }
+          }, { once: true });
+          try {
+            window.KPSDK.configure([{
+              protocol: "https:",
+              method: "POST",
+              domain: "gql.twitch.tv",
+              path: "/integrity",
+            }]);
+          } catch (e) {}
+        });
+      } else {
+        try {
+          integ = await integrityOnce();
+        } catch (e) {
+          integ = await integrityWithKasada();
+        }
+      }
+      break;
+    } catch (e) {
+      lastErr = e;
+      await sleep(1500);
+    }
   }
+  if (!integ) throw lastErr || new Error("integrity failed");
+
   const token = integ.token;
   if (!token) throw new Error("no integrity token");
 
@@ -104,48 +160,81 @@ async (cfg) => {
 }
 """
 
-
-def _parse_playwright_proxy(proxy_url: str | None) -> dict[str, str] | None:
-    if not proxy_url:
-        return None
-    return {"server": proxy_url}
+_BROWSER_PROFILE = Path(tempfile.gettempdir()) / "TwitchDropsUnlinkChrome"
 
 
-def _launch_browser(playwright):  # noqa: ANN001
-    launch_kwargs: dict = {
-        "headless": False,
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-dev-shm-usage",
-        ],
-    }
-    channels: list[str | None]
-    if sys.platform == "win32":
-        channels = ["chrome", "msedge", None]
-    else:
-        channels = ["chrome", "msedge", None]
+def _open_persistent_context(playwright):  # noqa: ANN001
+    """Chrome/Edge без прокси (прокси ломают integrity)."""
+    _BROWSER_PROFILE.mkdir(parents=True, exist_ok=True)
+    channels: list[str | None] = ["chrome", "msedge", None]
     last_err: Exception | None = None
     for channel in channels:
-        opts = dict(launch_kwargs)
+        kwargs: dict[str, Any] = {
+            "user_data_dir": str(_BROWSER_PROFILE),
+            "headless": False,
+            "ignore_default_args": ["--enable-automation"],
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--no-first-run",
+                "--no-default-browser-check",
+            ],
+            "user_agent": TWITCH_UA,
+            "locale": "en-US",
+            "viewport": {"width": 1400, "height": 900},
+        }
         if channel:
-            opts["channel"] = channel
+            kwargs["channel"] = channel
         try:
-            return playwright.chromium.launch(**opts), channel or "chromium"
+            context = playwright.chromium.launch_persistent_context(**kwargs)
+            context.add_init_script(STEALTH_INIT)
+            return context, channel or "chromium"
         except Exception as exc:  # noqa: BLE001
             last_err = exc
     raise RuntimeError(
-        "Не найден Google Chrome или Microsoft Edge. Установите браузер и повторите."
+        "Не найден Google Chrome или Edge. Установите браузер и повторите."
     ) from last_err
 
 
-def _browser_context(playwright, proxy_url: str | None):  # noqa: ANN001
-    browser, label = _launch_browser(playwright)
-    context = browser.new_context(
-        user_agent=TWITCH_UA,
-        locale="ru-RU",
-        proxy=_parse_playwright_proxy(proxy_url),
-    )
-    return browser, context, label
+def _auth_cookies(oauth_token: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": "auth-token",
+            "value": oauth_token,
+            "domain": ".twitch.tv",
+            "path": "/",
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+        }
+    ]
+
+
+def _prepare_cfg(
+    oauth_token: str,
+    operation_name: str,
+    query: str,
+    variables: dict[str, Any],
+    client_id: str | None,
+    integrity: TwitchIntegrity | None,
+    timeout_sec: float,
+) -> tuple[dict[str, Any], TwitchIntegrity]:
+    ig = integrity or TwitchIntegrity(client_id or "kimne78kx3ncx6brgo4mv6wki5h1ko")
+    ig.client_version = fetch_twilight_build_id()
+    cfg = {
+        "clientId": ig.client_id,
+        "oauthToken": oauth_token,
+        "deviceId": ig.device_id,
+        "clientVersion": ig.client_version,
+        "clientSessionId": ig.session_id,
+        "timeoutMs": int(timeout_sec * 1000),
+        "pageWarmupMs": 3000,
+        "kasadaScript": KASADA_SCRIPT,
+        "operationName": operation_name,
+        "query": query,
+        "variables": variables,
+    }
+    return cfg, ig
 
 
 def run_mutation_in_browser(
@@ -155,30 +244,21 @@ def run_mutation_in_browser(
     query: str,
     variables: dict[str, Any],
     client_id: str | None = None,
-    proxy_url: str | None = None,
+    proxy_url: str | None = None,  # noqa: ARG001 — намеренно игнорируем
     integrity: TwitchIntegrity | None = None,
-    timeout_sec: float = 120.0,
+    timeout_sec: float = 150.0,
 ) -> dict[str, Any]:
+    if proxy_url:
+        pass  # Chrome всегда без прокси — иначе integrity падает
+
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise RuntimeError("Установите playwright: pip install playwright") from exc
 
-    ig = integrity or TwitchIntegrity(client_id or "kimne78kx3ncx6brgo4mv6wki5h1ko")
-    ig.client_version = fetch_twilight_build_id()
-
-    cfg = {
-        "clientId": ig.client_id,
-        "oauthToken": oauth_token,
-        "deviceId": ig.device_id,
-        "clientVersion": ig.client_version,
-        "clientSessionId": ig.session_id,
-        "timeoutMs": int(timeout_sec * 1000),
-        "kasadaScript": KASADA_SCRIPT,
-        "operationName": operation_name,
-        "query": query,
-        "variables": variables,
-    }
+    cfg, _ig = _prepare_cfg(
+        oauth_token, operation_name, query, variables, client_id, integrity, timeout_sec
+    )
 
     last_error: Exception | None = None
     urls = (
@@ -187,26 +267,15 @@ def run_mutation_in_browser(
     )
 
     with sync_playwright() as playwright:
-        browser, context, label = _browser_context(playwright, proxy_url)
+        context, label = _open_persistent_context(playwright)
         try:
-            context.add_cookies(
-                [
-                    {
-                        "name": "auth-token",
-                        "value": oauth_token,
-                        "domain": ".twitch.tv",
-                        "path": "/",
-                        "httpOnly": False,
-                        "secure": True,
-                        "sameSite": "None",
-                    }
-                ]
-            )
             for url in urls:
+                context.clear_cookies()
+                context.add_cookies(_auth_cookies(oauth_token))
                 page = context.new_page()
                 try:
-                    page.goto(url, wait_until="domcontentloaded", timeout=int(timeout_sec * 1000))
-                    page.wait_for_timeout(4000)
+                    page.goto(url, wait_until="load", timeout=int(timeout_sec * 1000))
+                    page.wait_for_timeout(6000)
                     data = page.evaluate(_RUN_MUTATION_JS, cfg)
                     return data
                 except Exception as exc:  # noqa: BLE001
@@ -214,67 +283,12 @@ def run_mutation_in_browser(
                 finally:
                     page.close()
             raise RuntimeError(
-                f"Не удалось выполнить запрос в {label}: {last_error}"
+                f"Отвязка в {label} не удалась: {last_error}. "
+                "Нажмите «Сброс прокси» (Chrome идёт без прокси). "
+                "Не закрывайте окно Chrome до конца операции."
             ) from last_error
         finally:
-            browser.close()
-
-
-def fetch_integrity_via_browser(
-    oauth_token: str,
-    *,
-    client_id: str,
-    client_version: str,
-    device_id: str,
-    session_id: str,
-    proxy_url: str | None = None,
-    timeout_sec: float = 90.0,
-) -> tuple[str, float]:
-    """Только токен integrity (для совместимости; отвязка идёт через run_mutation_in_browser)."""
-    cfg = {
-        "clientId": client_id,
-        "oauthToken": oauth_token,
-        "deviceId": device_id,
-        "clientVersion": client_version,
-        "clientSessionId": session_id,
-        "timeoutMs": int(timeout_sec * 1000),
-        "kasadaScript": KASADA_SCRIPT,
-        "operationName": "ViewCount",
-        "query": "query ViewCount { __typename }",
-        "variables": {},
-    }
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError as exc:
-        raise RuntimeError("Установите playwright") from exc
-
-    with sync_playwright() as playwright:
-        browser, context, _label = _browser_context(playwright, proxy_url)
-        try:
-            context.add_cookies(
-                [
-                    {
-                        "name": "auth-token",
-                        "value": oauth_token,
-                        "domain": ".twitch.tv",
-                        "path": "/",
-                        "httpOnly": False,
-                        "secure": True,
-                        "sameSite": "None",
-                    }
-                ]
-            )
-            page = context.new_page()
-            page.goto(
-                "https://www.twitch.tv/drops/inventory",
-                wait_until="domcontentloaded",
-                timeout=int(timeout_sec * 1000),
-            )
-            page.wait_for_timeout(3500)
-            page.evaluate(_RUN_MUTATION_JS, cfg)
-        finally:
-            browser.close()
-    return "", time.time() + 600
+            context.close()
 
 
 def unlink_drop_game_in_browser(
@@ -291,74 +305,56 @@ def unlink_drop_game_in_browser(
         query=DELETE_OAUTH_APP,
         variables={"id": game_client_id},
         client_id=twitch_client_id,
-        proxy_url=proxy_url,
+        proxy_url=None,
         integrity=integrity,
     )
 
 
 class SharedBrowserUnlinker:
-    """Один браузер — много аккаунтов (массовая отвязка без лимита)."""
+    """Один Chrome — тысячи аккаунтов, без лимита."""
 
     def __init__(self, proxy_url: str | None = None) -> None:
-        self._proxy_url = proxy_url
+        if proxy_url:
+            pass
         self._playwright = None
-        self._browser = None
-        self._integrity = TwitchIntegrity("kimne78kx3ncx6brgo4mv6wki5h1ko")
+        self._context = None
+        self._game_client_id: str | None = None
 
     def __enter__(self) -> SharedBrowserUnlinker:
         from playwright.sync_api import sync_playwright
 
         self._playwright = sync_playwright().start()
-        self._browser, _, _ = _launch_browser(self._playwright)
+        self._context, _ = _open_persistent_context(self._playwright)
         return self
 
     def __exit__(self, *args: object) -> None:
-        if self._browser:
-            self._browser.close()
+        if self._context:
+            self._context.close()
         if self._playwright:
             self._playwright.stop()
 
     def unlink_one(self, oauth_token: str, game_client_id: str) -> None:
-        assert self._browser is not None
-        context = self._browser.new_context(
-            user_agent=TWITCH_UA,
-            locale="ru-RU",
-            proxy=_parse_playwright_proxy(self._proxy_url),
+        assert self._context is not None
+        self._game_client_id = game_client_id
+        cfg, _ig = _prepare_cfg(
+            oauth_token,
+            "DeleteOauthApp",
+            DELETE_OAUTH_APP,
+            {"id": game_client_id},
+            "kimne78kx3ncx6brgo4mv6wki5h1ko",
+            None,
+            150.0,
         )
+        self._context.clear_cookies()
+        self._context.add_cookies(_auth_cookies(oauth_token))
+        page = self._context.new_page()
         try:
-            context.add_cookies(
-                [
-                    {
-                        "name": "auth-token",
-                        "value": oauth_token,
-                        "domain": ".twitch.tv",
-                        "path": "/",
-                        "httpOnly": False,
-                        "secure": True,
-                        "sameSite": "None",
-                    }
-                ]
-            )
-            page = context.new_page()
-            ig = TwitchIntegrity(self._integrity.client_id)
-            cfg = {
-                "clientId": ig.client_id,
-                "oauthToken": oauth_token,
-                "deviceId": ig.device_id,
-                "clientVersion": fetch_twilight_build_id(),
-                "clientSessionId": ig.session_id,
-                "timeoutMs": 120000,
-                "kasadaScript": KASADA_SCRIPT,
-                "operationName": "DeleteOauthApp",
-                "query": DELETE_OAUTH_APP,
-                "variables": {"id": game_client_id},
-            }
             page.goto(
                 "https://www.twitch.tv/drops/inventory",
-                wait_until="domcontentloaded",
-                timeout=120000,
+                wait_until="load",
+                timeout=150000,
             )
-            page.wait_for_timeout(3500)
+            page.wait_for_timeout(6000)
             page.evaluate(_RUN_MUTATION_JS, cfg)
         finally:
-            context.close()
+            page.close()

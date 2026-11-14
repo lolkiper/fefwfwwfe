@@ -13,10 +13,11 @@ def format_user_error(exc: BaseException) -> str:
         return str(exc)
     if isinstance(exc, RuntimeError):
         msg = str(exc)
-        if "failed integrity check" in msg.lower():
+        if "failed integrity check" in msg.lower() or "integrity" in msg.lower():
             return (
-                "Twitch отклонил integrity. Установите 1.3.5+, Chrome, «Сброс прокси». "
-                "Отвязка идёт через Chrome — не закрывайте окно браузера, пока не исчезнет."
+                "Twitch отклонил integrity. Установите 1.3.6+, Google Chrome. "
+                "Нажмите «Сброс прокси» — отвязка в Chrome всегда без прокси из файла. "
+                "Не закрывайте окно Chrome, дождитесь завершения (до ~30 сек)."
             )
         if msg:
             return msg

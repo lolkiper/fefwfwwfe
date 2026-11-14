@@ -20,7 +20,8 @@ python3 -m twitch_unlink gui
 python3 -m twitch_unlink
 ```
 
-- **Файл аккаунтов** — выбор `.txt` с `login:password:token`;
+- **Файл аккаунтов** — любое количество строк `login:password:token` (без лимита);
+- **Отвязать на ВСЕХ аккаунтах** — массовая отвязка одной игры по всему файлу;
 - список аккаунтов слева, привязанные игры Drops справа;
 - отвязка выбранной игры или по `client_id` вручную;
 - опционально **файл прокси**, смена каждые 60 с.
@@ -63,12 +64,12 @@ python3 -m twitch_unlink drops --id '<client_id игры>' -y
 
 1. Откройте **https://github.com/lolkiper/fefwfwwfe/actions/workflows/build-installer.yml**
 2. Выберите последний успешный запуск → **Artifacts**
-3. **TwitchDropsUnlink-Windows** — `TwitchDropsUnlink-Setup-1.3.5.exe` (установщик) и portable zip
+3. **TwitchDropsUnlink-Windows** — `TwitchDropsUnlink-Setup-1.3.6.exe` (установщик) и portable zip
 4. **TwitchDropsUnlink-Linux** — `TwitchDropsUnlink-linux-x86_64.tar.gz`
 
 **Windows:** установите Setup или распакуйте portable, запустите `TwitchDropsUnlink.exe` — откроется окно программы.
 
-Для **отвязки** нужен **Google Chrome** (или Edge): на пару секунд откроется браузер, чтобы Twitch выдал защитный токен (иначе `failed integrity check`).
+Для **отвязки** нужен **Google Chrome**: Twitch проверяется только в Chrome **без прокси** (прокси из файла — только для списка игр). Не закрывайте Chrome до конца отвязки.
 
 **Сборка у себя (Windows):**
 

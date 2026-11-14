@@ -41,7 +41,7 @@ class TwitchDropsApp:
         self._active_account: AccountLine | None = None
         self._games: list[DropGameLink] = []
         self._proxy_rotator: ProxyRotator | None = None
-        self._proxy_countdown = tk.StringVar(value="Прокси: не заданы")
+        self._proxy_countdown = tk.StringVar(value="Прокси: не заданы (отвязка всегда без прокси)")
         self._status = tk.StringVar(value="Выберите файл с аккаунтами")
         self._user_label = tk.StringVar(value="—")
         self._acc_count = tk.StringVar(value="Аккаунты: 0")
@@ -320,14 +320,12 @@ class TwitchDropsApp:
             return
 
         self._bulk_running = True
-        proxy = self._proxy_url_for_browser()
-
         def work() -> tuple[int, int]:
             from twitch_unlink.integrity_browser import SharedBrowserUnlinker
 
             ok = 0
             fail = 0
-            with SharedBrowserUnlinker(proxy) as runner:
+            with SharedBrowserUnlinker(None) as runner:
                 for idx, acc in enumerate(self._accounts, start=1):
                     self._ui_q.put(
                         (
@@ -461,7 +459,7 @@ class TwitchDropsApp:
             messagebox.showinfo("Отвязка", "Нет активного аккаунта.")
             return
         self._status.set(
-            f"Отвязка «{label}»… (может открыться Chrome/Edge на несколько секунд)"
+            f"Отвязка «{label}»… Chrome без прокси, не закрывайте окно"
         )
 
         def work() -> None:

@@ -399,27 +399,13 @@ class TwitchUnlinkClient:
         """Отвязать игровой аккаунт Drops (OAuth client ID игры / издателя)."""
         from twitch_unlink.integrity_browser import unlink_drop_game_in_browser
 
-        try:
-            unlink_drop_game_in_browser(
-                self.token,
-                client_id,
-                twitch_client_id=self.client_id,
-                proxy_url=self.current_proxy_url(),
-                integrity=self._integrity,
-            )
-            return
-        except Exception as browser_exc:
-            mutation = """
-            mutation DeleteOauthApp($id: ID!) {
-              deleteOauthApp(input: { id: $id }) {
-                __typename
-              }
-            }
-            """
-            try:
-                self.gql(mutation, {"id": client_id}, operation_name="DeleteOauthApp", integrity=True)
-            except Exception:
-                raise RuntimeError(str(browser_exc)) from browser_exc
+        unlink_drop_game_in_browser(
+            self.token,
+            client_id,
+            twitch_client_id=self.client_id,
+            proxy_url=None,
+            integrity=self._integrity,
+        )
 
     def list_drop_game_links(self) -> list[DropGameLink]:
         query = """
