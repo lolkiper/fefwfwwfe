@@ -9,6 +9,7 @@ from typing import Any
 import requests
 
 from twitch_unlink.errors import ProxyConnectionError
+from twitch_unlink.integrity import TWITCH_UA, TwitchIntegrity
 from twitch_unlink.proxy_rotator import mask_proxy
 
 DEFAULT_CLIENT_ID = "kimne78kx3ncx6brgo4mv6wki5h1ko"
@@ -96,8 +97,10 @@ class TwitchUnlinkClient:
                 "Client-Id": client_id,
                 "Authorization": f"OAuth {self.token}",
                 "Content-Type": "application/json",
+                "User-Agent": TWITCH_UA,
             }
         )
+        self._integrity = TwitchIntegrity(client_id)
         self._proxy_rotator: Any = None
         self.user_id: str | None = None
         self.login: str | None = None
@@ -223,6 +226,8 @@ class TwitchUnlinkClient:
         query: str,
         variables: dict[str, Any] | None = None,
         operation_name: str | None = None,
+        *,
+        integrity: bool = False,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {"query": query}
         if variables:
@@ -230,16 +235,35 @@ class TwitchUnlinkClient:
         if operation_name:
             payload["operationName"] = operation_name
 
-        response = self._with_proxy_retry(
-            lambda: self._session.post(GQL_URL, data=json.dumps(payload), timeout=REQUEST_TIMEOUT)
-        )
-        response.raise_for_status()
-        body = response.json()
+        last_messages: list[str] = []
+        for attempt in range(2):
+            extra_headers: dict[str, str] = {}
+            if integrity:
+                token = self._integrity.ensure_token(self._session, self.token, REQUEST_TIMEOUT)
+                extra_headers = self._integrity.gql_headers(token)
 
-        if body.get("errors"):
-            messages = [e.get("message", str(e)) for e in body["errors"]]
-            raise RuntimeError("; ".join(messages))
-        return body.get("data") or {}
+            response = self._with_proxy_retry(
+                lambda: self._session.post(
+                    GQL_URL,
+                    data=json.dumps(payload),
+                    headers=extra_headers or None,
+                    timeout=REQUEST_TIMEOUT,
+                )
+            )
+            response.raise_for_status()
+            body = response.json()
+
+            if not body.get("errors"):
+                return body.get("data") or {}
+
+            last_messages = [e.get("message", str(e)) for e in body["errors"]]
+            needs_integrity = any("integrity" in m.lower() for m in last_messages)
+            if integrity and needs_integrity and attempt == 0:
+                self._integrity.invalidate()
+                continue
+            break
+
+        raise RuntimeError("; ".join(last_messages))
 
     def list_oauth_apps(self) -> list[OAuthApp]:
         query = """
@@ -373,7 +397,7 @@ class TwitchUnlinkClient:
           }
         }
         """
-        self.gql(mutation, {"id": client_id})
+        self.gql(mutation, {"id": client_id}, operation_name="DeleteOauthApp", integrity=True)
 
     def list_drop_game_links(self) -> list[DropGameLink]:
         query = """

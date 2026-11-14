@@ -13,6 +13,12 @@ def format_user_error(exc: BaseException) -> str:
         return str(exc)
     if isinstance(exc, RuntimeError):
         msg = str(exc)
+        if "failed integrity check" in msg.lower():
+            return (
+                "Twitch отклонил запрос (failed integrity check). "
+                "Обновите программу до последней версии, нажмите «Сброс прокси» и повторите. "
+                "Если не помогло — откройте Drops на twitch.tv в Chrome и отвяжите игру вручную."
+            )
         if msg:
             return msg
     if isinstance(exc, requests.exceptions.ProxyError):

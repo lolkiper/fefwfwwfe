@@ -63,7 +63,7 @@ python3 -m twitch_unlink drops --id '<client_id игры>' -y
 
 1. Откройте **https://github.com/lolkiper/fefwfwwfe/actions/workflows/build-installer.yml**
 2. Выберите последний успешный запуск → **Artifacts**
-3. **TwitchDropsUnlink-Windows** — `TwitchDropsUnlink-Setup-1.3.2.exe` (установщик) и portable zip
+3. **TwitchDropsUnlink-Windows** — `TwitchDropsUnlink-Setup-1.3.3.exe` (установщик) и portable zip
 4. **TwitchDropsUnlink-Linux** — `TwitchDropsUnlink-linux-x86_64.tar.gz`
 
 **Windows:** установите Setup или распакуйте portable, запустите `TwitchDropsUnlink.exe` — откроется окно программы.
