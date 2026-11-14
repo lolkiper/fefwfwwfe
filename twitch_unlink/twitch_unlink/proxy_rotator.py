@@ -119,7 +119,7 @@ class ProxyRotator:
                 self._rotated_at = time.monotonic()
                 proxy = self._proxies[self._index]
             if self._on_rotate:
-                on_rotate(proxy)
+                self._on_rotate(proxy)
 
     def stop(self) -> None:
         self._stop.set()

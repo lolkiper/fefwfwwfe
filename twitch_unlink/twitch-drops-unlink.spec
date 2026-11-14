@@ -2,32 +2,23 @@
 from pathlib import Path
 
 root = Path(SPECPATH)
-static = root / "twitch_unlink" / "web" / "static"
 
 a = Analysis(
     ["twitch_unlink/launcher.py"],
     pathex=[str(root)],
     binaries=[],
-    datas=[(str(static), "twitch_unlink/web/static")],
+    datas=[],
     hiddenimports=[
-        "uvicorn.logging",
-        "uvicorn.loops",
-        "uvicorn.loops.auto",
-        "uvicorn.protocols",
-        "uvicorn.protocols.http",
-        "uvicorn.protocols.http.auto",
-        "uvicorn.protocols.websockets",
-        "uvicorn.protocols.websockets.auto",
-        "uvicorn.lifespan",
-        "uvicorn.lifespan.on",
-        "twitch_unlink.web.app",
+        "tkinter",
+        "twitch_unlink.gui.app",
         "twitch_unlink.client",
         "twitch_unlink.proxy_rotator",
+        "twitch_unlink.accounts",
     ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["uvicorn", "fastapi", "pydantic"],
     noarchive=False,
     optimize=0,
 )
@@ -43,7 +34,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,

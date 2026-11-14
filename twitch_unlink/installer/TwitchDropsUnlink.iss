@@ -2,7 +2,7 @@
 ; Папка dist\TwitchDropsUnlink должна существовать (см. scripts\build_windows.ps1).
 
 #define MyAppName "Twitch Drops Unlink"
-#define MyAppVersion "1.2.0"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Twitch Drops Unlink"
 #define MyAppURL "https://github.com/lolkiper/fefwfwwfe"
 #define MyAppExeName "TwitchDropsUnlink.exe"
@@ -29,4 +29,4 @@ Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#MyAppExeName}"; Description: "Запустить {#MyAppName}"; Flags: nowait postinstall skipifsilent shellexec

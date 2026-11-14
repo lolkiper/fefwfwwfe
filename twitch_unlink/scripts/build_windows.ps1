@@ -8,7 +8,7 @@ python -m PyInstaller --noconfirm twitch-drops-unlink.spec
 $inno = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
 if (Test-Path $inno) {
     & $inno "installer\TwitchDropsUnlink.iss"
-    Write-Host "Installer: release\TwitchDropsUnlink-Setup-1.2.0.exe"
+    Write-Host "Installer: release\TwitchDropsUnlink-Setup-1.3.0.exe"
 } else {
     Write-Host "Inno Setup не найден. Portable: dist\TwitchDropsUnlink\"
 }
