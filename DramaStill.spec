@@ -42,9 +42,36 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=["packaging/rthook_ssl.py"],
-    excludes=["tkinter", "pytest", "PySide6.QtWebEngine", "PySide6.QtWebEngineCore"],
+    excludes=[
+        "tkinter",
+        "pytest",
+        "PySide6.QtWebEngine",
+        "PySide6.QtWebEngineCore",
+        "PySide6.QtWebEngineWidgets",
+        "PySide6.QtDesigner",
+    ],
     noarchive=False,
 )
+
+
+def _unused(entry) -> bool:
+    name = str(entry[0]).replace("\\", "/")
+    banned = (
+        "WebEngine",
+        "webengine",
+        "Qt6Designer",
+        "designer.exe",
+        "linguist.exe",
+        "assistant.exe",
+        "lrelease.exe",
+        "lupdate.exe",
+        "balsam",
+    )
+    return any(part in name for part in banned)
+
+
+a.binaries = [entry for entry in a.binaries if not _unused(entry)]
+a.datas = [entry for entry in a.datas if not _unused(entry)]
 pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
