@@ -9,6 +9,7 @@ Every character is an adult.
 Do not write sexual content, graphic gore, or instructions for real crime.
 The result is narration that a voice actor can read aloud.
 Return only the requested format. Do not add a slideshow, scene list, or extra images.
+Put that format in the reply itself. Do not spend the reply on analysis.
 """
 
 

@@ -165,6 +165,46 @@ def test_pollinations_waits_out_the_free_limit(monkeypatch):
     OpenAICompatLLM._next_allowed = 0.0
 
 
+def test_pollinations_asks_for_short_reasoning_and_retries_a_spent_budget(monkeypatch):
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
+    OpenAICompatLLM._next_allowed = 0.0
+    bodies = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        bodies.append(body)
+        if len(bodies) == 1:
+            return httpx.Response(
+                400,
+                json={
+                    "error": {
+                        "message": "The model exhausted its output token limit before producing an answer. Increase the token limit or reduce reasoning effort."
+                    }
+                },
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"ok\": true}"}, "finish_reason": "stop"}]},
+        )
+
+    notes = []
+    provider = OpenAICompatLLM(
+        base_url="https://text.pollinations.ai/openai",
+        api_key="",
+        model="openai-fast",
+        transport=httpx.MockTransport(handler),
+    )
+    provider.on_wait = notes.append
+    result = provider.complete(system="s", user="u", temperature=0.2, max_tokens=1000, json_mode=True)
+    assert "ok" in result.text
+    assert bodies[0]["reasoning_effort"] == "low"
+    assert bodies[0]["max_tokens"] == 1000
+    assert bodies[1]["reasoning_effort"] == "low"
+    assert bodies[1]["max_tokens"] == 2000
+    assert any("рассуждения" in note for note in notes)
+    OpenAICompatLLM._next_allowed = 0.0
+
+
 def test_daily_quota_switches_to_the_next_free_model(monkeypatch):
     waits = []
     notes = []

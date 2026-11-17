@@ -115,55 +115,84 @@ class OpenAICompatLLM:
         max_tokens: int,
         json_mode: bool,
     ) -> LLMResult:
-        def once(use_json: bool, token_field: str, reasoning: str | None) -> LLMResult:
-            payload: dict = {
-                "model": self.model,
-                "temperature": temperature,
-                "messages": [
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                token_field: max_tokens,
-            }
-            if use_json:
-                payload["response_format"] = {"type": "json_object"}
-            if reasoning:
-                payload["reasoning_effort"] = reasoning
-            response = self._post("/chat/completions", payload)
-            if response.status_code == 400 and reasoning and "reasoning" in response.text.lower():
-                return once(use_json, token_field, None)
-            if response.status_code == 400 and use_json:
-                body = response.text.lower()
-                if "response_format" in body or "json" in body:
-                    return once(False, token_field, reasoning)
-            if response.status_code == 400 and token_field == "max_tokens":
-                body = response.text.lower()
-                if "max_completion_tokens" in body or "max_tokens" in body:
-                    return once(use_json, "max_completion_tokens", reasoning)
-            self._raise_for_status(response)
-            data = response.json()
-            choice = (data.get("choices") or [{}])[0]
-            message = choice.get("message") or {}
-            content = message.get("content")
-            if isinstance(content, list):
-                text = "".join(
-                    part.get("text", "") for part in content if isinstance(part, dict)
-                )
-            else:
-                text = content or ""
-            if not text.strip() and reasoning != "none" and (message.get("reasoning") or message.get("reasoning_content")):
-                return once(use_json, token_field, "none")
-            if not text.strip():
-                raise ProviderError("Языковая модель вернула пустой ответ")
-            self._mark_turn()
-            return LLMResult(text=text, finish_reason=str(choice.get("finish_reason") or "stop"))
+        def attempt() -> LLMResult:
+            tried: set[tuple] = set()
 
-        initial_reasoning = "low" if "generativelanguage.googleapis.com" in self.base_url else None
+            def once(use_json: bool, token_field: str, reasoning: str | None, token_limit: int) -> LLMResult:
+                state = (use_json, token_field, reasoning, token_limit)
+                if state in tried:
+                    raise ProviderError("Языковая модель повторила тот же неудачный запрос")
+                tried.add(state)
+                payload: dict = {
+                    "model": self.model,
+                    "temperature": temperature,
+                    "messages": [
+                        {"role": "system", "content": system},
+                        {"role": "user", "content": user},
+                    ],
+                    token_field: token_limit,
+                }
+                if use_json:
+                    payload["response_format"] = {"type": "json_object"}
+                if reasoning:
+                    payload["reasoning_effort"] = reasoning
+                response = self._post("/chat/completions", payload)
+                if response.status_code == 400 and _unsupported_reasoning(response):
+                    if reasoning == "none":
+                        return once(use_json, token_field, "low", token_limit)
+                    return once(use_json, token_field, None, token_limit)
+                if response.status_code == 400 and _output_budget(response):
+                    self._note("Модель потратила лимит на рассуждения, повторяю запрос короче")
+                    if reasoning != "low":
+                        return once(use_json, token_field, "low", token_limit)
+                    if token_limit < 32000:
+                        return once(use_json, token_field, "low", min(32000, token_limit * 2))
+                if response.status_code == 400 and use_json:
+                    body = response.text.lower()
+                    if "response_format" in body or "json" in body:
+                        return once(False, token_field, reasoning, token_limit)
+                if response.status_code == 400 and token_field == "max_tokens":
+                    body = response.text.lower()
+                    if "max_completion_tokens" in body or "max_tokens" in body:
+                        return once(use_json, "max_completion_tokens", reasoning, token_limit)
+                self._raise_for_status(response)
+                data = response.json()
+                choice = (data.get("choices") or [{}])[0]
+                message = choice.get("message") or {}
+                content = message.get("content")
+                if isinstance(content, list):
+                    text = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+                else:
+                    text = content or ""
+                if not text.strip() and (message.get("reasoning") or message.get("reasoning_content")):
+                    self._note("Модель потратила лимит на рассуждения, повторяю запрос короче")
+                    if reasoning != "low":
+                        return once(use_json, token_field, "low", token_limit)
+                    if token_limit < 32000:
+                        return once(use_json, token_field, "low", min(32000, token_limit * 2))
+                if not text.strip():
+                    raise ProviderError("Языковая модель вернула пустой ответ")
+                self._mark_turn()
+                return LLMResult(text=text, finish_reason=str(choice.get("finish_reason") or "stop"))
+
+            initial_reasoning = "low" if self._short_reasoning() else None
+            return once(json_mode, "max_tokens", initial_reasoning, max_tokens)
+
         return with_retries(
-            lambda: once(json_mode, "max_tokens", initial_reasoning),
+            attempt,
             attempts=8,
             on_wait=self.on_wait,
             stop_check=self.stop_check,
+        )
+
+    def _short_reasoning(self) -> bool:
+        url = self.base_url.lower()
+        model = self.model.lower()
+        return (
+            "pollinations.ai" in url
+            or "generativelanguage.googleapis.com" in url
+            or "gpt-oss" in model
+            or model == "openai-fast"
         )
 
     def _wait_turn(self) -> None:
@@ -308,6 +337,16 @@ class AnthropicLLM:
             )
         data = response.json()
         return [str(row.get("id")) for row in data.get("data", []) if row.get("id")]
+
+
+def _unsupported_reasoning(response: httpx.Response) -> bool:
+    text = response.text.lower()
+    return "reasoning" in text and "not supported" in text
+
+
+def _output_budget(response: httpx.Response) -> bool:
+    text = response.text.lower()
+    return "output token" in text or "exhausted its output" in text
 
 
 def _quota_exhausted(exc: ProviderError) -> bool:
