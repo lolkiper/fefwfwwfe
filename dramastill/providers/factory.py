@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from dramastill.config.defaults import FLUX_BASE, LLM7_BASE, LLM7_FALLBACK, LLM7_MODEL, AppSettings
+from dramastill.config.defaults import (
+    FLUX_BASE,
+    LLM7_BASE,
+    LLM7_FALLBACK,
+    LLM7_MODEL,
+    POLLINATIONS_BASE,
+    POLLINATIONS_MODEL,
+    AppSettings,
+)
 from dramastill.core.secrets import SecretStore
 from dramastill.providers.base import ImageProvider, LLMProvider, TTSProvider
 from dramastill.providers.errors import ProviderError
@@ -19,10 +27,10 @@ class Providers:
 
 
 def llm_needs_key(settings: AppSettings) -> bool:
-    if settings.llm.provider in {"ollama", "llm7", "gemini"}:
+    if settings.llm.provider in {"ollama", "llm7", "gemini", "pollinations"}:
         return False
     base = (settings.llm.base_url or "").lower()
-    if "127.0.0.1" in base or "localhost" in base or "llm7.io" in base:
+    if "127.0.0.1" in base or "localhost" in base or "llm7.io" in base or "pollinations.ai" in base:
         return False
     return True
 
@@ -48,13 +56,17 @@ def build_providers(settings: AppSettings, secrets: SecretStore) -> Providers:
     )
 
 
-def gemini_falls_back(settings: AppSettings, secrets: SecretStore) -> bool:
-    return settings.llm.provider == "gemini" and not secrets.get("llm")
+def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
+    if settings.llm.provider == "pollinations" or "pollinations.ai" in (settings.llm.base_url or "").lower():
+        return not secrets.get("llm") or settings.llm.provider == "pollinations"
+    if settings.llm.provider == "gemini" and not secrets.get("llm"):
+        return True
+    return settings.llm.provider == "llm7" and not secrets.get("llm")
 
 
 def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
-    if gemini_falls_back(settings, secrets):
-        story = "История: LLM7 DeepSeek V4 Flash, при лимите Gemma 4, ключ Gemini не задан"
+    if uses_pollinations(settings, secrets):
+        story = "История: Pollinations GPT-OSS 20B, без ключа и без дневного лимита"
     elif settings.llm.provider == "llm7":
         story = f"История: LLM7 {settings.llm.model}"
     elif settings.llm.provider == "gemini":
@@ -76,11 +88,11 @@ def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
 
 def build_llm(settings: AppSettings, secrets: SecretStore):
     key = secrets.get("llm")
-    if gemini_falls_back(settings, secrets) or settings.llm.provider == "llm7":
-        base = settings.llm.base_url if settings.llm.provider == "llm7" and settings.llm.base_url else LLM7_BASE
-        model = settings.llm.model if settings.llm.provider == "llm7" and settings.llm.model else LLM7_MODEL
-        provider = OpenAICompatLLM(base_url=base, api_key=key, model=model)
-        provider.model_chain = tuple(name for name in (LLM7_MODEL, LLM7_FALLBACK) if name != model)
+    if uses_pollinations(settings, secrets):
+        return OpenAICompatLLM(base_url=POLLINATIONS_BASE, api_key="", model=POLLINATIONS_MODEL)
+    if settings.llm.provider == "llm7":
+        provider = OpenAICompatLLM(base_url=settings.llm.base_url or LLM7_BASE, api_key=key, model=settings.llm.model or LLM7_MODEL)
+        provider.model_chain = tuple(name for name in (LLM7_MODEL, LLM7_FALLBACK) if name != provider.model)
         return provider
     if llm_needs_key(settings) and not key:
         raise ProviderError("Не задан API-ключ языковой модели")

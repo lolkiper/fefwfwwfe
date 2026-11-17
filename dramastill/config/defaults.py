@@ -56,12 +56,15 @@ IMAGE_STYLES: list[tuple[str, str, str]] = [
 LLM7_BASE = "https://api.llm7.io/v1"
 LLM7_MODEL = "DeepSeek-V4-Flash-0731"
 LLM7_FALLBACK = "gemma4:31b"
+POLLINATIONS_BASE = "https://text.pollinations.ai/openai"
+POLLINATIONS_MODEL = "openai-fast"
 FLUX_BASE = "https://black-forest-labs-flux-1-schnell.hf.space"
 FLUX_MODEL = "flux-1-schnell"
 
 LLM_PRESETS: list[tuple[str, str, str, str]] = [
     ("gemini", "Gemini 3.8 Flash (бесплатно)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
-    ("llm7", "LLM7 DeepSeek V4 Flash (без ключа)", LLM7_BASE, LLM7_MODEL),
+    ("pollinations", "Pollinations GPT-OSS (без ключа)", POLLINATIONS_BASE, POLLINATIONS_MODEL),
+    ("llm7", "LLM7 DeepSeek (нужен бесплатный токен)", LLM7_BASE, LLM7_MODEL),
     ("groq", "Groq GPT-OSS 120B (бесплатно)", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
     ("openrouter", "OpenRouter free", "https://openrouter.ai/api/v1", "google/gemma-4-31b-it:free"),
     ("ollama", "Ollama (локально)", "http://127.0.0.1:11434/v1", "llama3.1"),
@@ -270,11 +273,6 @@ def app_settings_from_dict(raw: dict | None) -> AppSettings:
 
 
 def _retire_pollinations(settings: AppSettings) -> None:
-    llm_base = (settings.llm.base_url or "").lower()
-    if settings.llm.provider == "pollinations" or "pollinations.ai" in llm_base:
-        settings.llm.provider = "llm7"
-        settings.llm.base_url = LLM7_BASE
-        settings.llm.model = LLM7_MODEL
     image_base = (settings.image.base_url or "").lower()
     if settings.image.provider == "pollinations" or "pollinations.ai" in image_base:
         settings.image.provider = "flux"

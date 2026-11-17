@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
             layout,
             "Главная",
             "Одна кнопка запускает историю, единственное изображение, озвучку и сборку MP4. "
-            "Текст пишет бесплатная Gemini, без ключа — LLM7 DeepSeek, при лимите Gemma 4. Картинка — FLUX.1 Schnell, голос — Edge.",
+            "Текст пишет бесплатная Gemini, без ключа — Pollinations GPT-OSS. Картинка — FLUX.1 Schnell, голос — Edge.",
         )
         self.create_button = QPushButton("Создать новое видео")
         self.create_button.setObjectName("primary")
@@ -252,7 +252,7 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "История",
-            "Бесплатная Gemini 3.8 Flash придумывает сюжет. Без ключа ту же работу делает LLM7 DeepSeek V4 Flash. Изображение остаётся одно.",
+            "Бесплатная Gemini 3.8 Flash придумывает сюжет. Без ключа ту же работу делает Pollinations GPT-OSS. Паузу между запросами программа выдерживает сама. Изображение остаётся одно.",
         )
         box, form = self._group("Сюжет")
         self.theme = self._combo(THEMES, self.settings.story.theme)
@@ -530,7 +530,7 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "API и ключи",
-            "Бесплатный маршрут ключей не требует: текст пишет LLM7 DeepSeek, картинку рисует FLUX.1 Schnell. "
+            "Бесплатный маршрут ключей не требует: текст пишет Pollinations GPT-OSS, картинку рисует FLUX.1 Schnell. "
             "Ключ Gemini с aistudio.google.com/apikey включает более сильный текст. Ключи не пишутся в журнал.",
         )
         self.llm_key = QLineEdit(self.secrets.get("llm"))

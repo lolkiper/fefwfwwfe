@@ -265,22 +265,22 @@ def test_saved_pollinations_settings_move_off_that_service():
             "image": {"provider": "pollinations", "base_url": "https://image.pollinations.ai", "model": "sana"},
         }
     )
-    assert settings.llm.provider == "llm7"
-    assert "llm7.io" in settings.llm.base_url
+    assert settings.llm.provider == "pollinations"
+    assert "pollinations.ai" in settings.llm.base_url
     assert settings.image.provider == "flux"
     assert "pollinations" not in settings.image.base_url
 
 
-def test_gemini_without_key_uses_llm7(tmp_path):
+def test_gemini_without_key_uses_pollinations(tmp_path):
     secrets = SecretStore(tmp_path / "secrets")
     settings = AppSettings()
     provider = build_llm(settings, secrets)
-    assert provider.model == "DeepSeek-V4-Flash-0731"
-    assert "llm7.io" in provider.base_url
+    assert provider.model == "openai-fast"
+    assert "pollinations.ai" in provider.base_url
     route = describe_route(settings, secrets)
-    assert "DeepSeek" in route
-    assert "Pollinations" not in route
+    assert "Pollinations" in route
     assert "FLUX" in route
+    assert "дневного лимита" in route
     secrets.set("llm", "AIza-free-gemini-key")
     paid_route = build_llm(settings, secrets)
     assert paid_route.model == "gemini-3.8-flash"
