@@ -55,6 +55,7 @@ IMAGE_STYLES: list[tuple[str, str, str]] = [
 
 LLM7_BASE = "https://api.llm7.io/v1"
 LLM7_MODEL = "DeepSeek-V4-Flash-0731"
+LLM7_FALLBACK = "gemma4:31b"
 FLUX_BASE = "https://black-forest-labs-flux-1-schnell.hf.space"
 FLUX_MODEL = "flux-1-schnell"
 

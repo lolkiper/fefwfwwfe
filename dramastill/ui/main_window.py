@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
             layout,
             "Главная",
             "Одна кнопка запускает историю, единственное изображение, озвучку и сборку MP4. "
-            "Текст пишет бесплатная Gemini, без ключа — LLM7 DeepSeek. Картинка — FLUX.1 Schnell, голос — Edge.",
+            "Текст пишет бесплатная Gemini, без ключа — LLM7 DeepSeek, при лимите Gemma 4. Картинка — FLUX.1 Schnell, голос — Edge.",
         )
         self.create_button = QPushButton("Создать новое видео")
         self.create_button.setObjectName("primary")

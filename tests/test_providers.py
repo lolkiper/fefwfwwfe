@@ -165,6 +165,67 @@ def test_pollinations_waits_out_the_free_limit(monkeypatch):
     OpenAICompatLLM._next_allowed = 0.0
 
 
+def test_daily_quota_switches_to_the_next_free_model(monkeypatch):
+    waits = []
+    notes = []
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda seconds: waits.append(seconds))
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        model = json.loads(request.content.decode())["model"]
+        seen.append(model)
+        if model == "DeepSeek-V4-Flash-0731":
+            return httpx.Response(
+                429,
+                json={"error": {"message": "Daily token quota exceeded. Retry after 58 seconds."}},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"ok\": true}"}, "finish_reason": "stop"}]},
+        )
+
+    provider = OpenAICompatLLM(
+        base_url="https://api.llm7.io/v1",
+        api_key="",
+        model="DeepSeek-V4-Flash-0731",
+        transport=httpx.MockTransport(handler),
+    )
+    provider.model_chain = ("gemma4:31b",)
+    provider.on_wait = notes.append
+    result = provider.complete(system="s", user="u", temperature=0.2, max_tokens=100, json_mode=True)
+    assert "ok" in result.text
+    assert seen == ["DeepSeek-V4-Flash-0731", "gemma4:31b"]
+    assert provider.model == "gemma4:31b"
+    assert waits == []
+    assert any("следующую" in note for note in notes)
+
+
+def test_llm7_rate_limit_waits_the_requested_pause(monkeypatch):
+    waits = []
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda seconds: waits.append(seconds))
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": {"message": "Busy. Retry after 12 seconds."}})
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]},
+        )
+
+    provider = OpenAICompatLLM(
+        base_url="https://api.llm7.io/v1",
+        api_key="",
+        model="DeepSeek-V4-Flash-0731",
+        transport=httpx.MockTransport(handler),
+    )
+    result = provider.complete(system="s", user="u", temperature=0.2, max_tokens=20, json_mode=False)
+    assert result.text == "ok"
+    assert calls["n"] == 2
+    assert waits and waits[0] >= 12
+
+
 def test_flux_retries_then_saves_one_image(tmp_path, monkeypatch):
     monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
     payload = _png()

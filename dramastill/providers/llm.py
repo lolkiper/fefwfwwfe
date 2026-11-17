@@ -9,7 +9,14 @@ import httpx
 from dramastill.core.redact import redact
 from dramastill.providers.base import LLMResult
 from dramastill.providers.errors import ProviderError
-from dramastill.providers.retry import RETRY_STATUSES, parse_retry_after, sleep_until, soft_free_limit, with_retries
+from dramastill.providers.retry import (
+    RETRY_STATUSES,
+    daily_quota,
+    parse_retry_after,
+    sleep_until,
+    soft_free_limit,
+    with_retries,
+)
 
 
 class OpenAICompatLLM:
@@ -32,8 +39,74 @@ class OpenAICompatLLM:
         self._transport = transport
         self.on_wait: Callable[[str], None] | None = None
         self.stop_check: Callable[[], None] | None = None
+        self.model_chain: tuple[str, ...] = ()
 
     def complete(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> LLMResult:
+        last: ProviderError | None = None
+        for round_index in range(2):
+            try:
+                return self._complete_chain(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                )
+            except ProviderError as exc:
+                last = exc
+                if round_index == 1 or not _quota_exhausted(exc):
+                    raise
+                delay = min(90.0, float(exc.retry_after or 60.0))
+                self._note(f"Лимит бесплатной модели: пауза {max(1, int(delay + 0.5))} с, запрос продолжится сам")
+                sleep_until(delay, self.stop_check)
+        assert last is not None
+        raise last
+
+    def _complete_chain(
+        self,
+        *,
+        system: str,
+        user: str,
+        temperature: float,
+        max_tokens: int,
+        json_mode: bool,
+    ) -> LLMResult:
+        models: list[str] = []
+        for name in (self.model, *self.model_chain):
+            if name and name not in models:
+                models.append(name)
+        last: ProviderError | None = None
+        for index, model in enumerate(models):
+            self.model = model
+            try:
+                return self._complete_model(
+                    system=system,
+                    user=user,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    json_mode=json_mode,
+                )
+            except ProviderError as exc:
+                last = exc
+                if not _quota_exhausted(exc) or index == len(models) - 1:
+                    raise
+                self._note("Дневной лимит этой модели исчерпан, запрос уходит на следующую бесплатную модель")
+        assert last is not None
+        raise last
+
+    def _note(self, message: str) -> None:
+        if self.on_wait is not None:
+            self.on_wait(message)
+
+    def _complete_model(
         self,
         *,
         system: str,
@@ -141,15 +214,26 @@ class OpenAICompatLLM:
         if response.status_code < 400:
             return
         message = _error_message(response)
+        if daily_quota(response):
+            raise ProviderError(
+                redact(message, [self.api_key]),
+                status=response.status_code,
+                retryable=False,
+                retry_after=parse_retry_after(response),
+            )
         if soft_free_limit(response):
             delay = parse_retry_after(response) or 46
-            with type(self)._pace_lock:
-                type(self)._next_allowed = time.monotonic() + delay
+            if "pollinations.ai" in self.base_url:
+                with type(self)._pace_lock:
+                    type(self)._next_allowed = time.monotonic() + delay
+                retry_after = 0
+            else:
+                retry_after = delay
             raise ProviderError(
                 redact(message, [self.api_key]),
                 status=response.status_code,
                 retryable=True,
-                retry_after=0,
+                retry_after=retry_after,
             )
         raise ProviderError(
             redact(message, [self.api_key]),
@@ -224,6 +308,11 @@ class AnthropicLLM:
             )
         data = response.json()
         return [str(row.get("id")) for row in data.get("data", []) if row.get("id")]
+
+
+def _quota_exhausted(exc: ProviderError) -> bool:
+    text = str(exc).lower()
+    return exc.status in {402, 429} and "quota" in text
 
 
 def _error_message(response: httpx.Response) -> str:

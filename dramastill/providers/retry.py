@@ -34,6 +34,11 @@ def soft_free_limit(response: httpx.Response) -> bool:
     return response.status_code in {402, 429} and ("free limit" in text or "retry after" in text)
 
 
+def daily_quota(response: httpx.Response) -> bool:
+    text = response.text.lower()
+    return response.status_code in {402, 429} and "quota" in text
+
+
 def sleep_until(seconds: float, stop_check: Callable[[], None] | None = None) -> None:
     if seconds <= 0:
         return

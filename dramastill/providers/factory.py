@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from dramastill.config.defaults import FLUX_BASE, LLM7_BASE, LLM7_MODEL, AppSettings
+from dramastill.config.defaults import FLUX_BASE, LLM7_BASE, LLM7_FALLBACK, LLM7_MODEL, AppSettings
 from dramastill.core.secrets import SecretStore
 from dramastill.providers.base import ImageProvider, LLMProvider, TTSProvider
 from dramastill.providers.errors import ProviderError
@@ -54,7 +54,7 @@ def gemini_falls_back(settings: AppSettings, secrets: SecretStore) -> bool:
 
 def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     if gemini_falls_back(settings, secrets):
-        story = "История: LLM7 DeepSeek V4 Flash, ключ Gemini не задан"
+        story = "История: LLM7 DeepSeek V4 Flash, при лимите Gemma 4, ключ Gemini не задан"
     elif settings.llm.provider == "llm7":
         story = f"История: LLM7 {settings.llm.model}"
     elif settings.llm.provider == "gemini":
@@ -79,7 +79,9 @@ def build_llm(settings: AppSettings, secrets: SecretStore):
     if gemini_falls_back(settings, secrets) or settings.llm.provider == "llm7":
         base = settings.llm.base_url if settings.llm.provider == "llm7" and settings.llm.base_url else LLM7_BASE
         model = settings.llm.model if settings.llm.provider == "llm7" and settings.llm.model else LLM7_MODEL
-        return OpenAICompatLLM(base_url=base, api_key=key, model=model)
+        provider = OpenAICompatLLM(base_url=base, api_key=key, model=model)
+        provider.model_chain = tuple(name for name in (LLM7_MODEL, LLM7_FALLBACK) if name != model)
+        return provider
     if llm_needs_key(settings) and not key:
         raise ProviderError("Не задан API-ключ языковой модели")
     if settings.llm.provider == "anthropic":
