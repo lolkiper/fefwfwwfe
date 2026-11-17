@@ -37,32 +37,43 @@ def subprocess_kwargs() -> dict:
     return {}
 
 
+def _tool_filename(name: str) -> str:
+    return f"{name}.exe" if sys.platform == "win32" else name
+
+
+def _beside(root: Path, name: str) -> list[Path]:
+    filename = _tool_filename(name)
+    paths = [root / filename, root / "ffmpeg" / "bin" / filename]
+    if filename != name:
+        paths.append(root / name)
+    return paths
+
+
 def resolve_tool(explicit: str, name: str) -> str:
     if explicit:
         path = Path(explicit)
-        if path.exists():
+        if path.is_file():
             return str(path)
-    sibling = None
-    if explicit:
-        candidate = Path(explicit).with_name(name if sys.platform != "win32" else f"{name}.exe")
-        if candidate.exists():
-            sibling = str(candidate)
+        sibling = path.with_name(_tool_filename(name))
+        if sibling.is_file():
+            return str(sibling)
+    roots: list[Path] = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).resolve().parent)
+    for root in roots:
+        for candidate in _beside(root, name):
+            if candidate.is_file():
+                return str(candidate)
     found = shutil.which(name)
-    if sibling:
-        return sibling
     if found:
         return found
-    local = Path.cwd() / ("ffmpeg" if name == "ffmpeg" else name)
-    if sys.platform == "win32":
-        for candidate in (
-            Path.cwd() / "ffmpeg" / "bin" / f"{name}.exe",
-            Path.cwd() / f"{name}.exe",
-        ):
-            if candidate.exists():
-                return str(candidate)
-    if local.exists():
-        return str(local)
-    raise FFmpegError(f"Не найден {name}. Установите FFmpeg и укажите путь в настройках видео.")
+    for candidate in _beside(Path.cwd(), name):
+        if candidate.is_file():
+            return str(candidate)
+    raise FFmpegError(
+        f"Не найден {name}. Положите {_tool_filename(name)} рядом с DramaStill.exe "
+        "или укажите путь в настройках видео."
+    )
 
 
 def resolve_ffmpeg(settings: VideoSettings) -> tuple[str, str]:

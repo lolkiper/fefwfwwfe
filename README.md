@@ -30,13 +30,15 @@ run.bat
 
 На Linux и macOS: `python3 -m dramastill`.
 
-Сборка окна Windows:
+Готовая программа для Windows — архив `DramaStill-windows.zip` из сборки GitHub Actions. Внутри папка с `DramaStill.exe`, `ffmpeg.exe` и `ffprobe.exe`. Python ставить не нужно: распакуйте архив и запустите `DramaStill.exe`.
+
+Собрать тот же архив у себя:
 
 ```bat
 build_windows.bat
 ```
 
-Рядом с `DramaStill.exe` можно положить `ffmpeg.exe` и `ffprobe.exe`. Если видеокарта NVIDIA отвечает, кодирование переключается на NVENC. Иначе используется libx264.
+Скрипт ставит зависимости, собирает окно через PyInstaller и скачивает FFmpeg в `dist\DramaStill\`. Если видеокарта NVIDIA отвечает, кодирование переключается на NVENC. Иначе используется libx264. Ошибка запуска пишется в `%APPDATA%\DramaStill\startup-error.log`.
 
 ## Ключи
 
