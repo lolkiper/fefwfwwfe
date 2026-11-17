@@ -46,6 +46,7 @@ def ensure_story(
     temperature: float,
     max_tokens: int,
 ) -> dict:
+    _bind_llm(llm, token, log)
     story = load_story(path)
     target_words = max(80, int(settings.duration_minutes * settings.words_per_minute))
     if not _concept_ready(story):
@@ -120,6 +121,7 @@ def ensure_metadata(
     token: CancelToken,
     log: Log,
 ) -> dict:
+    _bind_llm(llm, token, log)
     if path.exists():
         try:
             existing = json.loads(path.read_text(encoding="utf-8"))
@@ -154,6 +156,13 @@ def ensure_metadata(
         raise ProviderError("Модель не собрала материалы для YouTube")
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
+
+
+def _bind_llm(llm, token: CancelToken, log: Log) -> None:
+    if hasattr(llm, "on_wait"):
+        llm.on_wait = lambda message: log("info", message)
+    if hasattr(llm, "stop_check"):
+        llm.stop_check = token.check
 
 
 def _generate_concept(llm, settings, target_words, temperature, max_tokens, log: Log) -> dict:

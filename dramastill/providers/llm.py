@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+import threading
+import time
+from typing import Callable
+
 import httpx
 
 from dramastill.core.redact import redact
 from dramastill.providers.base import LLMResult
 from dramastill.providers.errors import ProviderError
-from dramastill.providers.retry import RETRY_STATUSES, with_retries
+from dramastill.providers.retry import RETRY_STATUSES, parse_retry_after, sleep_until, soft_free_limit, with_retries
 
 
 class OpenAICompatLLM:
     """Chat Completions для OpenAI, OpenRouter, Groq, Ollama и совместимых серверов."""
+
+    _pace_lock = threading.Lock()
+    _next_allowed = 0.0
 
     def __init__(
         self,
@@ -23,6 +30,8 @@ class OpenAICompatLLM:
         self.api_key = api_key
         self.model = model
         self._transport = transport
+        self.on_wait: Callable[[str], None] | None = None
+        self.stop_check: Callable[[], None] | None = None
 
     def complete(
         self,
@@ -73,12 +82,36 @@ class OpenAICompatLLM:
                 return once(use_json, token_field, "none")
             if not text.strip():
                 raise ProviderError("Языковая модель вернула пустой ответ")
+            self._mark_turn()
             return LLMResult(text=text, finish_reason=str(choice.get("finish_reason") or "stop"))
 
         initial_reasoning = "low" if "generativelanguage.googleapis.com" in self.base_url else None
-        return with_retries(lambda: once(json_mode, "max_tokens", initial_reasoning))
+        return with_retries(
+            lambda: once(json_mode, "max_tokens", initial_reasoning),
+            attempts=8,
+            on_wait=self.on_wait,
+            stop_check=self.stop_check,
+        )
+
+    def _wait_turn(self) -> None:
+        if "pollinations.ai" not in self.base_url:
+            return
+        with type(self)._pace_lock:
+            wait = type(self)._next_allowed - time.monotonic()
+        if wait <= 0.3:
+            return
+        if self.on_wait is not None:
+            self.on_wait(f"Лимит бесплатной модели: пауза {max(1, int(wait + 0.5))} с, запрос продолжится сам")
+        sleep_until(wait, self.stop_check)
+
+    def _mark_turn(self) -> None:
+        if "pollinations.ai" not in self.base_url:
+            return
+        with type(self)._pace_lock:
+            type(self)._next_allowed = time.monotonic() + 46
 
     def _post(self, path: str, payload: dict) -> httpx.Response:
+        self._wait_turn()
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -108,10 +141,21 @@ class OpenAICompatLLM:
         if response.status_code < 400:
             return
         message = _error_message(response)
+        if soft_free_limit(response):
+            delay = parse_retry_after(response) or 46
+            with type(self)._pace_lock:
+                type(self)._next_allowed = time.monotonic() + delay
+            raise ProviderError(
+                redact(message, [self.api_key]),
+                status=response.status_code,
+                retryable=True,
+                retry_after=0,
+            )
         raise ProviderError(
             redact(message, [self.api_key]),
             status=response.status_code,
             retryable=response.status_code in RETRY_STATUSES,
+            retry_after=parse_retry_after(response),
         )
 
 

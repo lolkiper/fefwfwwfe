@@ -130,6 +130,41 @@ def test_edge_tts_speaks_a_real_phrase(tmp_path):
     assert dest.stat().st_size > 1000
 
 
+def test_pollinations_waits_out_the_free_limit(monkeypatch):
+    waits = []
+    notes = []
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda seconds: waits.append(seconds))
+    OpenAICompatLLM._next_allowed = 0.0
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(
+                402,
+                json={"error": {"message": "Free limit reached: 1 reply every 45 seconds per IP. Retry after 27s"}},
+                headers={"Retry-After": "27"},
+            )
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "{\"ok\": true}"}, "finish_reason": "stop"}]},
+        )
+
+    provider = OpenAICompatLLM(
+        base_url="https://text.pollinations.ai/openai",
+        api_key="",
+        model="openai-fast",
+        transport=httpx.MockTransport(handler),
+    )
+    provider.on_wait = notes.append
+    result = provider.complete(system="s", user="u", temperature=0.2, max_tokens=100, json_mode=True)
+    assert "ok" in result.text
+    assert calls["n"] == 2
+    assert waits and waits[0] >= 26
+    assert notes and "пауза" in notes[0]
+    OpenAICompatLLM._next_allowed = 0.0
+
+
 def test_pollinations_retries_then_saves_one_image(tmp_path, monkeypatch):
     monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
     payload = _png()

@@ -9,7 +9,7 @@ import httpx
 from dramastill.core.redact import redact
 from dramastill.providers.errors import ProviderError
 from dramastill.providers.llm import _error_message
-from dramastill.providers.retry import RETRY_STATUSES, with_retries
+from dramastill.providers.retry import RETRY_STATUSES, parse_retry_after, with_retries
 
 _NEGATIVE = (
     "text, letters, watermark, logo, caption, collage, split screen, comic panels, "
@@ -49,6 +49,7 @@ class PollinationsImageProvider:
                     "Pollinations временно занят, запрос повторяется",
                     status=response.status_code,
                     retryable=True,
+                    retry_after=parse_retry_after(response),
                 )
             if response.status_code >= 400:
                 raise ProviderError(
