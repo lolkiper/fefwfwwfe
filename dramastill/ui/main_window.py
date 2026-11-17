@@ -406,7 +406,11 @@ class MainWindow(QMainWindow):
         self.video_bitrate = QLineEdit(video.video_bitrate)
         self.audio_bitrate = QLineEdit(video.audio_bitrate)
         self.encoder = self._combo(
-            [("auto", "Авто: NVENC, если карта отвечает"), ("libx264", "Процессор (libx264)"), ("h264_nvenc", "NVIDIA NVENC")],
+            [
+                ("auto", "Авто: процессор, NVENC только на максимальной скорости"),
+                ("libx264", "Процессор (libx264)"),
+                ("h264_nvenc", "NVIDIA NVENC"),
+            ],
             video.encoder,
         )
         self.x264_preset = self._combo(
@@ -415,7 +419,7 @@ class MainWindow(QMainWindow):
         )
         self.chunk_seconds = self._int(10, 300, video.chunk_seconds)
         self.chunk_seconds.setSuffix(" с")
-        self.parallel_projects = self._int(1, 3, video.max_parallel_projects)
+        self.parallel_projects = self._int(1, 8, video.max_parallel_projects)
         self.cleanup = QCheckBox("Удалять временные фрагменты после успеха")
         self.cleanup.setChecked(video.cleanup_temp)
         self.output_dir = QLineEdit(video.output_dir or str(default_output_dir()))
@@ -436,6 +440,29 @@ class MainWindow(QMainWindow):
         form.addRow("Пресет x264", self.x264_preset)
         form.addRow("Длина фрагмента", self.chunk_seconds)
         form.addRow("Проектов сразу", self.parallel_projects)
+        self.performance_mode = self._combo(
+            [
+                ("low", "Низкая нагрузка"),
+                ("balanced", "Баланс"),
+                ("maximum", "Максимальная скорость"),
+            ],
+            video.performance_mode,
+        )
+        self.render_mode = self._combo(
+            [
+                ("fast", "Быстрый монтаж"),
+                ("low_resource", "Тихий монтаж"),
+            ],
+            video.render_mode,
+        )
+        self.cpu_threads = self._int(0, 32, video.cpu_threads)
+        self.cpu_threads.setSpecialValueText("авто")
+        self.memory_limit = self._int(60, 95, video.memory_limit_percent)
+        self.memory_limit.setSuffix(" %")
+        form.addRow("Режим нагрузки", self.performance_mode)
+        form.addRow("Режим монтажа", self.render_mode)
+        form.addRow("Потоки CPU", self.cpu_threads)
+        form.addRow("Потолок памяти", self.memory_limit)
         form.addRow("", self.cleanup)
         form.addRow("Папка экспорта", output_row)
         form.addRow("ffmpeg", self.ffmpeg_path)
@@ -656,6 +683,10 @@ class MainWindow(QMainWindow):
         settings.video.x264_preset = self.x264_preset.currentData()
         settings.video.chunk_seconds = self.chunk_seconds.value()
         settings.video.max_parallel_projects = self.parallel_projects.value()
+        settings.video.performance_mode = self.performance_mode.currentData()
+        settings.video.render_mode = self.render_mode.currentData()
+        settings.video.cpu_threads = self.cpu_threads.value()
+        settings.video.memory_limit_percent = self.memory_limit.value()
         settings.video.cleanup_temp = self.cleanup.isChecked()
         settings.video.output_dir = self.output_dir.text().strip()
         settings.video.ffmpeg_path = self.ffmpeg_path.text().strip()

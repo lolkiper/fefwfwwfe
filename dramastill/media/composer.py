@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,7 @@ from dramastill.media.ffmpeg_util import (
 )
 from dramastill.media.motion import motion_expressions, motion_plan
 from dramastill.media.particles import LOOP_SECONDS
+from dramastill.media.resources import chunk_workers, encode_threads
 from dramastill.media.visualizer import BarRenderer, parse_color
 from dramastill.util import concat_path, even
 
@@ -60,22 +62,35 @@ def render_movie(
         encoding="utf-8",
     )
     cache: dict = {}
-    paths: list[Path] = []
+    paths: list[Path | None] = [None] * len(slices)
+    jobs: list[tuple[int, int, int, Path, float]] = []
     for index, (start, count) in enumerate(slices):
         token.check()
         dest = chunks_dir / f"{index:05d}.mkv"
         expected = count / fps
         if _chunk_ready(ffprobe, dest, expected):
             log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов")
-            paths.append(dest)
-            progress((index + 1) / len(slices))
+            paths[index] = dest
             continue
         slice_audio = audio_dir / f"{index:05d}.wav"
         _slice_audio(ffmpeg, audio, slice_audio, start / fps, expected)
+        jobs.append((index, start, count, dest, expected))
+    done = len(slices) - len(jobs)
+    if slices:
+        progress(done / len(slices))
+    workers = 1 if len(jobs) <= 1 else chunk_workers(settings)
+    threads = encode_threads(settings, workers)
+    if jobs:
+        log("info", f"Сборка фрагментов: {len(jobs)}, одновременно {workers}, потоков кодирования на фрагмент {threads}")
+
+    def _job(item: tuple[int, int, int, Path, float]) -> int:
+        index, start, count, dest, expected = item
+        token.check()
         log("info", f"Собирается фрагмент {index + 1} из {len(slices)}")
         partial = dest.with_suffix(".partial.mkv")
         if partial.exists():
             partial.unlink()
+        slice_audio = audio_dir / f"{index:05d}.wav"
         try:
             _render_chunk(
                 ffmpeg=ffmpeg,
@@ -89,7 +104,8 @@ def render_movie(
                 frames=count,
                 token=token,
                 cache=cache,
-                on_fraction=lambda fraction, index=index: progress((index + fraction) / len(slices)),
+                threads=threads,
+                on_fraction=lambda fraction, index=index: progress((done + fraction) / len(slices)),
             )
         except Exception:
             if partial.exists():
@@ -99,10 +115,32 @@ def render_movie(
         if not _chunk_ready(ffprobe, dest, expected):
             dest.unlink(missing_ok=True)
             raise FFmpegError(f"Фрагмент {index + 1} собрался с неверной длительностью")
-        paths.append(dest)
-        progress((index + 1) / len(slices))
+        return index
+
+    if workers <= 1:
+        for item in jobs:
+            index = _job(item)
+            paths[index] = item[3]
+            done += 1
+            progress(done / len(slices))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            future_map = {pool.submit(_job, item): item for item in jobs}
+            try:
+                for future in as_completed(future_map):
+                    item = future_map[future]
+                    index = future.result()
+                    paths[index] = item[3]
+                    done += 1
+                    progress(done / len(slices))
+            except Exception:
+                pool.shutdown(wait=False, cancel_futures=True)
+                raise
+    ordered = [path for path in paths if path is not None]
+    if len(ordered) != len(slices):
+        raise FFmpegError("Не все фрагменты видео собрались")
     final = work_dir / "final.mp4"
-    _concat(ffmpeg, paths, final, settings.audio_bitrate)
+    _concat(ffmpeg, ordered, final, settings.audio_bitrate)
     checked = probe(ffprobe, final)
     if not checked.has_video or not checked.has_audio:
         raise FFmpegError("В итоговом файле нет изображения или звука")
@@ -162,6 +200,7 @@ def _render_chunk(
     token: CancelToken,
     cache: dict,
     on_fraction,
+    threads: int = 0,
 ) -> None:
     fps = max(8, int(settings.fps))
     duration = frames / fps
@@ -177,6 +216,10 @@ def _render_chunk(
         "error",
         "-progress",
         "pipe:2",
+        "-filter_threads",
+        str(max(1, threads or 1)),
+        "-filter_complex_threads",
+        str(max(1, threads or 1)),
         "-loop",
         "1",
         "-framerate",
@@ -204,7 +247,7 @@ def _render_chunk(
                 "-f",
                 "rawvideo",
                 "-pix_fmt",
-                "rgb24",
+                "rgba",
                 "-s",
                 f"{width}x{visual_height}",
                 "-r",
@@ -229,7 +272,7 @@ def _render_chunk(
         visual_index=visual_index,
         visual_height=visual_height,
     )
-    video_args = encoder_args(ffmpeg, settings, cache)
+    video_args = encoder_args(ffmpeg, settings, cache, threads)
     cmd = inputs + [
         "-filter_complex",
         graph,
@@ -338,10 +381,8 @@ def _filter_graph(
         current = "[withpar]"
     if visual_index is not None:
         top = height - visual_height
-        parts.append(
-            f"[{visual_index}:v]pad={width}:{height}:0:{top}:black,format=gbrp[vis]"
-        )
-        parts.append(f"{current}[vis]blend=all_mode=screen:shortest=1[withvis]")
+        parts.append(f"[{visual_index}:v]format=rgba[vis]")
+        parts.append(f"{current}[vis]overlay=0:{top}:shortest=1:format=auto[withvis]")
         current = "[withvis]"
     parts.append(f"{current}format=yuv420p,setpts=PTS-STARTPTS[vout]")
     parts.append(

@@ -27,10 +27,13 @@ class BarRenderer:
         self.color = np.array(color, dtype=np.float32)
         self.gap = min(0.75, max(0.05, float(gap)))
         gradient = np.linspace(0.42, 1.0, height, dtype=np.float32)[:, None]
-        self.column = (gradient * self.color).astype(np.uint8)
+        rgb = (gradient * self.color).astype(np.uint8)
+        self.column = np.zeros((height, 4), dtype=np.uint8)
+        self.column[:, :3] = rgb
+        self.column[:, 3] = 255
 
     def frame(self, levels: np.ndarray) -> np.ndarray:
-        image = np.zeros((self.height, self.width, 3), dtype=np.uint8)
+        image = np.zeros((self.height, self.width, 4), dtype=np.uint8)
         count = max(1, int(levels.shape[0]))
         margin = int(self.width * 0.035)
         usable = max(count, self.width - margin * 2)

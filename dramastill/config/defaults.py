@@ -239,7 +239,11 @@ class VideoSettings:
     ffmpeg_path: str = ""
     ffprobe_path: str = ""
     cleanup_temp: bool = True
-    max_parallel_projects: int = 1
+    max_parallel_projects: int = 2
+    performance_mode: str = "balanced"
+    render_mode: str = "fast"
+    cpu_threads: int = 0
+    memory_limit_percent: int = 90
     output_dir: str = ""
 
 

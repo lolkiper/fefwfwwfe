@@ -9,6 +9,7 @@ from dramastill.core.database import Database
 from dramastill.core.redact import redact
 from dramastill.core.secrets import SecretStore
 from dramastill.media.ffmpeg_util import stop_active_ffmpeg
+from dramastill.media.resources import memory_allows, project_slots
 from dramastill.pipeline.runner import Callbacks, run_project
 
 
@@ -72,9 +73,13 @@ class Scheduler(QThread):
     def run(self) -> None:
         while not self._stop.is_set():
             settings = self.db.load_settings()
-            limit = max(1, min(3, int(settings.video.max_parallel_projects)))
+            limit = project_slots(settings.video)
             with self._lock:
                 running = len(self._active)
+            if running < limit and not memory_allows(settings.video):
+                self._wake.wait(2.0)
+                self._wake.clear()
+                continue
             if running < limit:
                 project = self.db.claim_next_queued()
                 if project is not None:

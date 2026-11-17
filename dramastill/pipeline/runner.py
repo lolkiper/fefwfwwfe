@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import traceback
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from dramastill.media.audio_analysis import ensure_bands
 from dramastill.media.bookends import deliver_movie
 from dramastill.media.composer import render_movie
 from dramastill.media.ffmpeg_util import FFmpegError, probe, resolve_ffmpeg
+from dramastill.media.resources import chunk_workers, project_slots
 from dramastill.media.image_service import ensure_image
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
@@ -65,6 +67,12 @@ def run_project(
         ffmpeg, ffprobe = resolve_ffmpeg(settings.video)
         active = providers or build_providers(settings, secrets)
         log("info", describe_route(settings, secrets))
+        log(
+            "info",
+            "Скорость: "
+            f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
+            f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}.",
+        )
         story_path = work / "story.json"
         narration_path = work / "narration.txt"
         progress(0.02, "story")
@@ -84,28 +92,17 @@ def run_project(
         if callbacks is not None:
             callbacks.title(title)
 
-        progress(0.24, "image")
-        image = ensure_image(
+        progress(0.24, "prepare")
+        image, audio, metadata = _prepare_media(
+            settings=settings,
             story=story,
-            settings=settings.image,
-            provider=active.image,
-            dest=work / "image.png",
-            prompt_path=work / "image_prompt.txt",
-            log=log,
-        )
-        progress(0.30, "image")
-
-        progress(0.31, "tts")
-        audio = ensure_narration_audio(
+            active=active,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
-            story=story,
-            settings=settings.voice,
-            provider=active.tts,
-            work_dir=work,
+            work=work,
             token=token,
             log=log,
-            progress=lambda fraction: progress(0.31 + 0.27 * fraction, "tts"),
+            progress=progress,
         )
         audio_info = probe(ffprobe, audio)
         log("info", f"Длительность озвучки: {format_clock(audio_info.duration)}")
@@ -162,16 +159,6 @@ def run_project(
             log=log,
         )
         progress(0.95, "publish")
-        metadata = ensure_metadata(
-            story=story,
-            llm=active.llm,
-            path=work / "youtube.json",
-            settings=settings.story,
-            temperature=settings.llm.temperature,
-            max_tokens=settings.llm.max_tokens,
-            token=token,
-            log=log,
-        )
         thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or title
         thumbnail = compose_thumbnail(image, thumb_text, work / "thumbnail.jpg")
         output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
@@ -207,6 +194,73 @@ def run_project(
         detail = redact(traceback.format_exc(), secrets.values())
         (work / "error.log").write_text(detail, encoding="utf-8")
         raise
+
+
+def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log, progress):
+    parallel = settings.video.performance_mode != "low" and settings.video.render_mode != "low_resource"
+
+    def do_image():
+        token.check()
+        progress(0.26, "image")
+        return ensure_image(
+            story=story,
+            settings=settings.image,
+            provider=active.image,
+            dest=work / "image.png",
+            prompt_path=work / "image_prompt.txt",
+            log=log,
+        )
+
+    def do_audio():
+        token.check()
+        progress(0.32, "tts")
+        return ensure_narration_audio(
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            story=story,
+            settings=settings.voice,
+            provider=active.tts,
+            work_dir=work,
+            token=token,
+            log=log,
+            progress=lambda fraction: progress(0.32 + 0.22 * fraction, "tts"),
+        )
+
+    def do_meta():
+        token.check()
+        return ensure_metadata(
+            story=story,
+            llm=active.llm,
+            path=work / "youtube.json",
+            settings=settings.story,
+            temperature=settings.llm.temperature,
+            max_tokens=settings.llm.max_tokens,
+            token=token,
+            log=log,
+        )
+
+    if not parallel:
+        return do_image(), do_audio(), do_meta()
+    log("info", "Картинка, озвучка и описание собираются одновременно")
+    tasks = {"image": do_image, "audio": do_audio, "meta": do_meta}
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        future_map = {pool.submit(fn): name for name, fn in tasks.items()}
+        try:
+            for future in as_completed(future_map):
+                results[future_map[future]] = future.result()
+        except Exception:
+            token.request("cancel")
+            raise
+    return results["image"], results["audio"], results["meta"]
+
+
+def _mode_label(mode: str) -> str:
+    return {"low": "низкая нагрузка", "maximum": "максимальная скорость"}.get(mode, "баланс")
+
+
+def _render_label(mode: str) -> str:
+    return "тихий" if mode == "low_resource" else "быстрый"
 
 
 def _final_ready(ffprobe: str, path: Path, audio_duration: float) -> bool:

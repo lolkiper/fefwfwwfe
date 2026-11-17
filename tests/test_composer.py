@@ -91,7 +91,11 @@ def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch
         on_fraction=lambda _value: None,
     )
     assert commands
-    assert "thread_queue_size" not in commands[0]
+    command = commands[0]
+    assert "thread_queue_size" not in command
+    graph = command[command.index("-filter_complex") + 1]
+    assert "overlay=" in graph
+    assert graph.count("blend=all_mode=screen") == 1
 
 
 def test_single_image_moves_and_bars_follow_voice(tmp_path):

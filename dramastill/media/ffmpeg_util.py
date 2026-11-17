@@ -229,10 +229,13 @@ def stop_active_ffmpeg() -> None:
             continue
 
 
-def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict) -> list[str]:
+def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict, threads: int = 0) -> list[str]:
+    from dramastill.media.resources import allow_nvenc
+
     choice = settings.encoder
     if choice == "auto":
-        choice = "h264_nvenc" if nvenc_works(ffmpeg, cache) else "libx264"
+        choice = "h264_nvenc" if allow_nvenc(settings) and nvenc_works(ffmpeg, cache) else "libx264"
+    thread_args = ["-threads", str(max(1, threads))] if threads > 0 else []
     if choice == "h264_nvenc":
         return [
             "-c:v",
@@ -247,16 +250,20 @@ def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict) -> list[str]
             settings.video_bitrate,
             "-pix_fmt",
             "yuv420p",
+            *thread_args,
         ]
     return [
         "-c:v",
         "libx264",
         "-preset",
         settings.x264_preset or "veryfast",
+        "-tune",
+        "stillimage",
         "-b:v",
         settings.video_bitrate,
         "-pix_fmt",
         "yuv420p",
+        *thread_args,
     ]
 
 
