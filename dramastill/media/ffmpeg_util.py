@@ -215,7 +215,7 @@ def run_ffmpeg(
             continue
         raise exc
     if code != 0:
-        tail = "\n".join(line for line in stderr.splitlines() if line and not line.startswith("out_time"))[-12:]
+        tail = ffmpeg_error_text(stderr)
         raise FFmpegError(tail or f"ffmpeg завершился с кодом {code}")
 
 
@@ -284,6 +284,11 @@ def nvenc_works(ffmpeg: str, cache: dict) -> bool:
     except OSError:
         cache["nvenc"] = False
     return bool(cache["nvenc"])
+
+
+def ffmpeg_error_text(stderr: str) -> str:
+    lines = [line.strip() for line in stderr.splitlines() if line.strip() and not line.strip().startswith("out_time")]
+    return "\n".join(lines[-12:])
 
 
 def _progress_seconds(value: str) -> float | None:

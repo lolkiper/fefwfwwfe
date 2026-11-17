@@ -53,9 +53,14 @@ IMAGE_STYLES: list[tuple[str, str, str]] = [
     ),
 ]
 
+LLM7_BASE = "https://api.llm7.io/v1"
+LLM7_MODEL = "DeepSeek-V4-Flash-0731"
+FLUX_BASE = "https://black-forest-labs-flux-1-schnell.hf.space"
+FLUX_MODEL = "flux-1-schnell"
+
 LLM_PRESETS: list[tuple[str, str, str, str]] = [
     ("gemini", "Gemini 3.8 Flash (бесплатно)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
-    ("pollinations", "Pollinations GPT-OSS (без ключа)", "https://text.pollinations.ai/openai", "openai-fast"),
+    ("llm7", "LLM7 DeepSeek V4 Flash (без ключа)", LLM7_BASE, LLM7_MODEL),
     ("groq", "Groq GPT-OSS 120B (бесплатно)", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
     ("openrouter", "OpenRouter free", "https://openrouter.ai/api/v1", "google/gemma-4-31b-it:free"),
     ("ollama", "Ollama (локально)", "http://127.0.0.1:11434/v1", "llama3.1"),
@@ -65,7 +70,7 @@ LLM_PRESETS: list[tuple[str, str, str, str]] = [
 ]
 
 IMAGE_PRESETS: list[tuple[str, str, str, str]] = [
-    ("pollinations", "Pollinations Sana (без ключа)", "https://image.pollinations.ai", "sana"),
+    ("flux", "FLUX.1 Schnell (без ключа)", FLUX_BASE, FLUX_MODEL),
     ("openai", "OpenAI Images (платно)", "https://api.openai.com/v1", "dall-e-3"),
     ("stability", "Stability AI (платно)", "https://api.stability.ai", "core"),
     ("openai_compatible", "Совместимый Images API", "https://api.openai.com/v1", "dall-e-3"),
@@ -162,9 +167,9 @@ class LLMSettings:
 
 @dataclass
 class ImageSettings:
-    provider: str = "pollinations"
-    base_url: str = "https://image.pollinations.ai"
-    model: str = "sana"
+    provider: str = "flux"
+    base_url: str = FLUX_BASE
+    model: str = FLUX_MODEL
     size: str = "1280x720"
     style: str = "cinematic_realistic"
     style_extra: str = ""
@@ -252,13 +257,28 @@ def _take(cls, raw: object):
 
 def app_settings_from_dict(raw: dict | None) -> AppSettings:
     data = raw or {}
-    return AppSettings(
+    settings = AppSettings(
         story=_take(StorySettings, data.get("story")),
         llm=_take(LLMSettings, data.get("llm")),
         image=_take(ImageSettings, data.get("image")),
         voice=_take(VoiceSettings, data.get("voice")),
         video=_take(VideoSettings, data.get("video")),
     )
+    _retire_pollinations(settings)
+    return settings
+
+
+def _retire_pollinations(settings: AppSettings) -> None:
+    llm_base = (settings.llm.base_url or "").lower()
+    if settings.llm.provider == "pollinations" or "pollinations.ai" in llm_base:
+        settings.llm.provider = "llm7"
+        settings.llm.base_url = LLM7_BASE
+        settings.llm.model = LLM7_MODEL
+    image_base = (settings.image.base_url or "").lower()
+    if settings.image.provider == "pollinations" or "pollinations.ai" in image_base:
+        settings.image.provider = "flux"
+        settings.image.base_url = FLUX_BASE
+        settings.image.model = FLUX_MODEL
 
 
 def style_prompt(style_id: str) -> str:

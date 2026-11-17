@@ -1,15 +1,16 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
-from urllib.parse import quote
 
 import httpx
 
+from dramastill.config.defaults import FLUX_BASE
 from dramastill.core.redact import redact
 from dramastill.providers.errors import ProviderError
 from dramastill.providers.llm import _error_message
-from dramastill.providers.retry import RETRY_STATUSES, parse_retry_after, with_retries
+from dramastill.providers.retry import RETRY_STATUSES, with_retries
 
 _NEGATIVE = (
     "text, letters, watermark, logo, caption, collage, split screen, comic panels, "
@@ -17,51 +18,48 @@ _NEGATIVE = (
 )
 
 
-class PollinationsImageProvider:
-    """Одно изображение через бесплатную модель Sana. Ключ не нужен."""
+class FluxSchnellImageProvider:
+    """Один кадр 16:9 через FLUX.1 Schnell. Ключ не нужен."""
 
-    def __init__(self, *, base_url: str = "https://image.pollinations.ai", model: str = "sana", transport: httpx.BaseTransport | None = None):
-        self.base_url = (base_url or "https://image.pollinations.ai").rstrip("/")
-        self.model = model or "sana"
+    def __init__(self, *, base_url: str = FLUX_BASE, model: str = "flux-1-schnell", transport: httpx.BaseTransport | None = None):
+        self.base_url = (base_url or FLUX_BASE).rstrip("/")
+        self.model = model or "flux-1-schnell"
         self._transport = transport
 
     def generate(self, *, prompt: str, dest: Path, size: str, seed: int | None) -> None:
-        width, height = _frame_size(size)
+        width, height = _flux_size(size)
         text = " ".join(prompt.split())
-        if len(text) > 1500:
-            text = text[:1500]
-        url = f"{self.base_url}/prompt/{quote(text, safe='')}"
-        params = {
-            "model": self.model,
-            "width": str(width),
-            "height": str(height),
-            "nologo": "true",
-            "enhance": "false",
-        }
-        if seed is not None and seed >= 0:
-            params["seed"] = str(seed)
+        if len(text) > 1800:
+            text = text[:1800]
+        chosen = 0 if seed is None or seed < 0 else int(seed)
+        randomize = seed is None or seed < 0
 
         def once() -> None:
-            with httpx.Client(timeout=httpx.Timeout(180, connect=30), follow_redirects=True, transport=self._transport) as client:
-                response = client.get(url, params=params)
-            if response.status_code in {402, 408, 409, 429, 500, 502, 503, 504}:
-                raise ProviderError(
-                    "Pollinations временно занят, запрос повторяется",
-                    status=response.status_code,
-                    retryable=True,
-                    retry_after=parse_retry_after(response),
+            timeout = httpx.Timeout(300, connect=30)
+            with httpx.Client(timeout=timeout, follow_redirects=True, transport=self._transport) as client:
+                started = client.post(
+                    f"{self.base_url}/gradio_api/call/infer",
+                    json={"data": [text, chosen, randomize, width, height, 4]},
                 )
-            if response.status_code >= 400:
-                raise ProviderError(
-                    redact(_error_message(response), []),
-                    status=response.status_code,
-                    retryable=response.status_code in RETRY_STATUSES,
-                )
-            if not _looks_like_image(response.content):
-                raise ProviderError("Pollinations вернул не изображение", retryable=True)
-            dest.write_bytes(response.content)
+                if started.status_code in {408, 409, 429, 500, 502, 503, 504}:
+                    raise ProviderError("FLUX временно занят, запрос повторяется", status=started.status_code, retryable=True)
+                if started.status_code >= 400:
+                    raise ProviderError(redact(started.text[:300], []), status=started.status_code, retryable=False)
+                event_id = str((started.json() or {}).get("event_id") or "")
+                if not event_id:
+                    raise ProviderError("FLUX не принял запрос на изображение", retryable=True)
+                result = client.get(f"{self.base_url}/gradio_api/call/infer/{event_id}")
+                if result.status_code in {408, 409, 429, 500, 502, 503, 504}:
+                    raise ProviderError("FLUX временно занят, запрос повторяется", status=result.status_code, retryable=True)
+                if result.status_code >= 400:
+                    raise ProviderError(redact(result.text[:300], []), status=result.status_code, retryable=False)
+                file_url = _flux_file_url(result.text)
+                image = client.get(file_url)
+            if image.status_code >= 400 or not _looks_like_image(image.content):
+                raise ProviderError("FLUX вернул не изображение", retryable=True)
+            dest.write_bytes(image.content)
 
-        with_retries(once, attempts=5, base_delay=8)
+        with_retries(once, attempts=4, base_delay=6)
 
 
 class OpenAIImageProvider:
@@ -161,6 +159,39 @@ class StabilityImageProvider:
             dest.write_bytes(response.content)
 
         with_retries(lambda: once(True))
+
+
+def _flux_size(size: str) -> tuple[int, int]:
+    width, height = _frame_size(size)
+    width = min(1280, max(512, width - width % 16))
+    height = min(768, max(288, height - height % 16))
+    return width, height
+
+
+def _flux_file_url(body: str) -> str:
+    event = ""
+    complete = ""
+    error = ""
+    for line in body.splitlines():
+        if line.startswith("event:"):
+            event = line.split(":", 1)[1].strip()
+        elif line.startswith("data:"):
+            data = line.split(":", 1)[1].strip()
+            if event == "complete":
+                complete = data
+            elif event == "error":
+                error = data
+    if not complete:
+        raise ProviderError(error or "FLUX не вернул изображение", retryable=True)
+    try:
+        payload = json.loads(complete)
+    except json.JSONDecodeError as exc:
+        raise ProviderError("FLUX вернул непонятный ответ", retryable=True) from exc
+    item = payload[0] if isinstance(payload, list) and payload else payload
+    url = item.get("url") if isinstance(item, dict) else ""
+    if not url:
+        raise ProviderError("FLUX не вернул файл изображения", retryable=True)
+    return str(url)
 
 
 def _frame_size(size: str) -> tuple[int, int]:

@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from dramastill.media import ffmpeg_util
+from dramastill.media.ffmpeg_util import ffmpeg_error_text
 
 
 def test_frozen_exe_uses_ffmpeg_beside_itself(tmp_path, monkeypatch):
@@ -23,3 +24,8 @@ def test_explicit_path_wins(tmp_path, monkeypatch):
     monkeypatch.setattr(ffmpeg_util.sys, "frozen", False, raising=False)
 
     assert Path(ffmpeg_util.resolve_tool(str(chosen), "ffmpeg")) == chosen
+
+
+def test_ffmpeg_error_keeps_the_invalid_argument_line():
+    stderr = "out_time=00:00:01.00\nError opening input files: Invalid argument\n"
+    assert ffmpeg_error_text(stderr) == "Error opening input files: Invalid argument"

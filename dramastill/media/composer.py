@@ -201,8 +201,6 @@ def _render_chunk(
         visual_height = even(max(48, int(settings.visualizer_height * height / 1080)))
         inputs.extend(
             [
-                "-thread_queue_size",
-                "1024",
                 "-f",
                 "rawvideo",
                 "-pix_fmt",

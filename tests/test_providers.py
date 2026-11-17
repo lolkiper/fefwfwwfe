@@ -10,7 +10,7 @@ from dramastill.config.defaults import AppSettings
 from dramastill.core.secrets import SecretStore
 from dramastill.providers.errors import ProviderError
 from dramastill.providers.factory import build_llm, build_providers, describe_route
-from dramastill.providers.image import OpenAIImageProvider, PollinationsImageProvider, StabilityImageProvider
+from dramastill.providers.image import FluxSchnellImageProvider, OpenAIImageProvider, StabilityImageProvider
 from dramastill.providers.llm import AnthropicLLM, OpenAICompatLLM
 from dramastill.providers.tts import edge_prosody
 
@@ -165,38 +165,61 @@ def test_pollinations_waits_out_the_free_limit(monkeypatch):
     OpenAICompatLLM._next_allowed = 0.0
 
 
-def test_pollinations_retries_then_saves_one_image(tmp_path, monkeypatch):
+def test_flux_retries_then_saves_one_image(tmp_path, monkeypatch):
     monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
     payload = _png()
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls["n"] += 1
-        assert "prompt" in str(request.url)
-        assert request.url.params["model"] == "sana"
-        assert request.url.params["width"] == "1280"
-        if calls["n"] == 1:
-            return httpx.Response(503, json={"error": "busy"})
+        if request.method == "POST":
+            if calls["n"] == 1:
+                return httpx.Response(503, json={"error": "busy"})
+            body = json.loads(request.content.decode())
+            assert body["data"][3] == 1280
+            assert body["data"][4] == 720
+            return httpx.Response(200, json={"event_id": "evt"})
+        if str(request.url).endswith("/evt"):
+            data = json.dumps([{"url": "https://flux.test/still.png"}])
+            return httpx.Response(200, text=f"event: complete\ndata: {data}\n")
         return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
 
     dest = tmp_path / "still.png"
-    PollinationsImageProvider(transport=httpx.MockTransport(handler)).generate(
+    FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler)).generate(
         prompt="one cinematic still",
         dest=dest,
         size="1280x720",
         seed=3,
     )
-    assert calls["n"] == 2
+    assert calls["n"] == 4
     assert dest.read_bytes() == payload
 
 
-def test_gemini_without_key_uses_pollinations(tmp_path):
+def test_saved_pollinations_settings_move_off_that_service():
+    from dramastill.config.defaults import app_settings_from_dict
+
+    settings = app_settings_from_dict(
+        {
+            "llm": {"provider": "pollinations", "base_url": "https://text.pollinations.ai/openai", "model": "openai-fast"},
+            "image": {"provider": "pollinations", "base_url": "https://image.pollinations.ai", "model": "sana"},
+        }
+    )
+    assert settings.llm.provider == "llm7"
+    assert "llm7.io" in settings.llm.base_url
+    assert settings.image.provider == "flux"
+    assert "pollinations" not in settings.image.base_url
+
+
+def test_gemini_without_key_uses_llm7(tmp_path):
     secrets = SecretStore(tmp_path / "secrets")
     settings = AppSettings()
     provider = build_llm(settings, secrets)
-    assert provider.model == "openai-fast"
-    assert "pollinations.ai" in provider.base_url
-    assert "GPT-OSS" in describe_route(settings, secrets)
+    assert provider.model == "DeepSeek-V4-Flash-0731"
+    assert "llm7.io" in provider.base_url
+    route = describe_route(settings, secrets)
+    assert "DeepSeek" in route
+    assert "Pollinations" not in route
+    assert "FLUX" in route
     secrets.set("llm", "AIza-free-gemini-key")
     paid_route = build_llm(settings, secrets)
     assert paid_route.model == "gemini-3.8-flash"

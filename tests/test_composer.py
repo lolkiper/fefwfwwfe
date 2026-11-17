@@ -58,6 +58,42 @@ def _frame(path: Path, second: float) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.uint8).reshape((360, 640, 3))
 
 
+def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch):
+    commands = []
+
+    def capture(cmd, **_kwargs):
+        commands.append(cmd)
+
+    monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
+    monkeypatch.setattr(
+        "dramastill.media.composer.encoder_args",
+        lambda *_args, **_kwargs: ["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+    )
+    settings = VideoSettings()
+    settings.width = 640
+    settings.height = 360
+    settings.fps = 12
+    settings.visualizer = True
+    from dramastill.media.composer import _render_chunk
+
+    _render_chunk(
+        ffmpeg="ffmpeg",
+        image=tmp_path / "still.png",
+        audio=tmp_path / "voice.wav",
+        particles=tmp_path / "particles.mp4",
+        bands=np.ones((4, 8), dtype=np.float32),
+        dest=tmp_path / "chunk.mkv",
+        settings=settings,
+        start_frame=0,
+        frames=4,
+        token=CancelToken(),
+        cache={},
+        on_fraction=lambda _value: None,
+    )
+    assert commands
+    assert "thread_queue_size" not in commands[0]
+
+
 def test_single_image_moves_and_bars_follow_voice(tmp_path):
     image = tmp_path / "still.png"
     audio = tmp_path / "voice.wav"

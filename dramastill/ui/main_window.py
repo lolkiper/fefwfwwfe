@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
             layout,
             "Главная",
             "Одна кнопка запускает историю, единственное изображение, озвучку и сборку MP4. "
-            "Текст пишет бесплатная Gemini, без ключа — GPT-OSS. Картинка — Pollinations, голос — Edge.",
+            "Текст пишет бесплатная Gemini, без ключа — LLM7 DeepSeek. Картинка — FLUX.1 Schnell, голос — Edge.",
         )
         self.create_button = QPushButton("Создать новое видео")
         self.create_button.setObjectName("primary")
@@ -252,7 +252,7 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "История",
-            "Бесплатная Gemini 3.8 Flash придумывает сюжет. Без ключа ту же работу делает Pollinations GPT-OSS. Изображение остаётся одно.",
+            "Бесплатная Gemini 3.8 Flash придумывает сюжет. Без ключа ту же работу делает LLM7 DeepSeek V4 Flash. Изображение остаётся одно.",
         )
         box, form = self._group("Сюжет")
         self.theme = self._combo(THEMES, self.settings.story.theme)
@@ -298,7 +298,7 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "Изображение",
-            "Одна картинка 16:9 рисуется бесплатной моделью Pollinations Sana. Ключ не нужен. Внешность персонажей входит в этот единственный запрос.",
+            "Одна картинка 16:9 рисуется бесплатной моделью FLUX.1 Schnell. Ключ не нужен. Внешность персонажей входит в этот единственный запрос.",
         )
         box, form = self._group("Провайдер")
         self.image_provider = self._combo([(key, label) for key, label, _url, _model in IMAGE_PRESETS], self.settings.image.provider)
@@ -530,8 +530,8 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "API и ключи",
-            "Бесплатный маршрут ключей не требует. Ключ Gemini с aistudio.google.com/apikey включает более сильный текст. "
-            "Ключи не пишутся в журнал.",
+            "Бесплатный маршрут ключей не требует: текст пишет LLM7 DeepSeek, картинку рисует FLUX.1 Schnell. "
+            "Ключ Gemini с aistudio.google.com/apikey включает более сильный текст. Ключи не пишутся в журнал.",
         )
         self.llm_key = QLineEdit(self.secrets.get("llm"))
         self.llm_key.setEchoMode(QLineEdit.Password)
@@ -1024,13 +1024,13 @@ class MainWindow(QMainWindow):
 
         def action() -> str:
             provider = build_image(settings, self.secrets)
-            if settings.image.provider == "pollinations":
+            if settings.image.provider == "flux":
                 import httpx
 
-                response = httpx.get(settings.image.base_url.rstrip("/") + "/models", timeout=30)
+                response = httpx.get(settings.image.base_url.rstrip("/") + "/config", timeout=30)
                 if response.status_code >= 400:
-                    raise RuntimeError(f"Pollinations ответил {response.status_code}")
-                return "Pollinations отвечает. Ключ не нужен, картинка при проверке не генерировалась."
+                    raise RuntimeError(f"FLUX ответил {response.status_code}")
+                return "FLUX.1 Schnell отвечает. Ключ не нужен, картинка при проверке не генерировалась."
             if settings.image.provider == "stability":
                 import httpx
 
