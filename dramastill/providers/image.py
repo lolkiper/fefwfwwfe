@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -14,6 +15,52 @@ _NEGATIVE = (
     "text, letters, watermark, logo, caption, collage, split screen, comic panels, "
     "extra fingers, deformed face, cartoon, anime, low resolution"
 )
+
+
+class PollinationsImageProvider:
+    """Одно изображение через бесплатную модель Sana. Ключ не нужен."""
+
+    def __init__(self, *, base_url: str = "https://image.pollinations.ai", model: str = "sana", transport: httpx.BaseTransport | None = None):
+        self.base_url = (base_url or "https://image.pollinations.ai").rstrip("/")
+        self.model = model or "sana"
+        self._transport = transport
+
+    def generate(self, *, prompt: str, dest: Path, size: str, seed: int | None) -> None:
+        width, height = _frame_size(size)
+        text = " ".join(prompt.split())
+        if len(text) > 1500:
+            text = text[:1500]
+        url = f"{self.base_url}/prompt/{quote(text, safe='')}"
+        params = {
+            "model": self.model,
+            "width": str(width),
+            "height": str(height),
+            "nologo": "true",
+            "enhance": "false",
+        }
+        if seed is not None and seed >= 0:
+            params["seed"] = str(seed)
+
+        def once() -> None:
+            with httpx.Client(timeout=httpx.Timeout(180, connect=30), follow_redirects=True, transport=self._transport) as client:
+                response = client.get(url, params=params)
+            if response.status_code in {402, 408, 409, 429, 500, 502, 503, 504}:
+                raise ProviderError(
+                    "Pollinations временно занят, запрос повторяется",
+                    status=response.status_code,
+                    retryable=True,
+                )
+            if response.status_code >= 400:
+                raise ProviderError(
+                    redact(_error_message(response), []),
+                    status=response.status_code,
+                    retryable=response.status_code in RETRY_STATUSES,
+                )
+            if not _looks_like_image(response.content):
+                raise ProviderError("Pollinations вернул не изображение", retryable=True)
+            dest.write_bytes(response.content)
+
+        with_retries(once, attempts=5, base_delay=8)
 
 
 class OpenAIImageProvider:
@@ -113,6 +160,27 @@ class StabilityImageProvider:
             dest.write_bytes(response.content)
 
         with_retries(lambda: once(True))
+
+
+def _frame_size(size: str) -> tuple[int, int]:
+    try:
+        width_text, height_text = size.lower().split("x", 1)
+        width, height = int(width_text), int(height_text)
+    except (AttributeError, ValueError):
+        width, height = 1280, 720
+    width = min(1920, max(512, width))
+    height = min(1080, max(288, height))
+    return width, height
+
+
+def _looks_like_image(payload: bytes) -> bool:
+    if len(payload) < 32:
+        return False
+    if payload.startswith(b"\xff\xd8") or payload.startswith(b"\x89PNG") or payload.startswith(b"GIF8"):
+        return True
+    if payload.startswith(b"RIFF") and b"WEBP" in payload[:16]:
+        return True
+    return False
 
 
 def _decode_b64(value: str) -> bytes:

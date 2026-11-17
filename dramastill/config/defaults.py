@@ -54,24 +54,27 @@ IMAGE_STYLES: list[tuple[str, str, str]] = [
 ]
 
 LLM_PRESETS: list[tuple[str, str, str, str]] = [
-    ("openai", "OpenAI", "https://api.openai.com/v1", "gpt-4o-mini"),
-    ("openrouter", "OpenRouter", "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
-    ("groq", "Groq", "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile"),
+    ("gemini", "Gemini 3.8 Flash (бесплатно)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
+    ("pollinations", "Pollinations GPT-OSS (без ключа)", "https://text.pollinations.ai/openai", "openai-fast"),
+    ("groq", "Groq GPT-OSS 120B (бесплатно)", "https://api.groq.com/openai/v1", "openai/gpt-oss-120b"),
+    ("openrouter", "OpenRouter free", "https://openrouter.ai/api/v1", "google/gemma-4-31b-it:free"),
     ("ollama", "Ollama (локально)", "http://127.0.0.1:11434/v1", "llama3.1"),
-    ("anthropic", "Anthropic", "https://api.anthropic.com", "claude-sonnet-4-5"),
+    ("openai", "OpenAI (платно)", "https://api.openai.com/v1", "gpt-4o-mini"),
+    ("anthropic", "Anthropic (платно)", "https://api.anthropic.com", "claude-sonnet-4-5"),
     ("custom", "Свой OpenAI-совместимый адрес", "http://127.0.0.1:8080/v1", "local-model"),
 ]
 
 IMAGE_PRESETS: list[tuple[str, str, str, str]] = [
-    ("openai", "OpenAI Images", "https://api.openai.com/v1", "dall-e-3"),
-    ("stability", "Stability AI", "https://api.stability.ai", "core"),
+    ("pollinations", "Pollinations Sana (без ключа)", "https://image.pollinations.ai", "sana"),
+    ("openai", "OpenAI Images (платно)", "https://api.openai.com/v1", "dall-e-3"),
+    ("stability", "Stability AI (платно)", "https://api.stability.ai", "core"),
     ("openai_compatible", "Совместимый Images API", "https://api.openai.com/v1", "dall-e-3"),
 ]
 
 TTS_PRESETS: list[tuple[str, str, str, str]] = [
-    ("edge", "Microsoft Edge TTS", "", "edge"),
-    ("openai", "OpenAI TTS", "https://api.openai.com/v1", "gpt-4o-mini-tts"),
-    ("elevenlabs", "ElevenLabs", "https://api.elevenlabs.io", "eleven_multilingual_v2"),
+    ("edge", "Edge Neural (без ключа)", "", "edge"),
+    ("openai", "OpenAI TTS (платно)", "https://api.openai.com/v1", "gpt-4o-mini-tts"),
+    ("elevenlabs", "ElevenLabs (платно)", "https://api.elevenlabs.io", "eleven_multilingual_v2"),
 ]
 
 RESOLUTIONS: list[tuple[str, int, int]] = [
@@ -150,19 +153,19 @@ class StorySettings:
 
 @dataclass
 class LLMSettings:
-    provider: str = "openai"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "gpt-4o-mini"
+    provider: str = "gemini"
+    base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
+    model: str = "gemini-3.8-flash"
     temperature: float = 0.9
     max_tokens: int = 8000
 
 
 @dataclass
 class ImageSettings:
-    provider: str = "openai"
-    base_url: str = "https://api.openai.com/v1"
-    model: str = "dall-e-3"
-    size: str = "1792x1024"
+    provider: str = "pollinations"
+    base_url: str = "https://image.pollinations.ai"
+    model: str = "sana"
+    size: str = "1280x720"
     style: str = "cinematic_realistic"
     style_extra: str = ""
     consistency_lock: bool = True

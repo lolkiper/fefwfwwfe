@@ -33,7 +33,7 @@ class OpenAICompatLLM:
         max_tokens: int,
         json_mode: bool,
     ) -> LLMResult:
-        def once(use_json: bool, token_field: str) -> LLMResult:
+        def once(use_json: bool, token_field: str, reasoning: str | None) -> LLMResult:
             payload: dict = {
                 "model": self.model,
                 "temperature": temperature,
@@ -45,15 +45,19 @@ class OpenAICompatLLM:
             }
             if use_json:
                 payload["response_format"] = {"type": "json_object"}
+            if reasoning:
+                payload["reasoning_effort"] = reasoning
             response = self._post("/chat/completions", payload)
+            if response.status_code == 400 and reasoning and "reasoning" in response.text.lower():
+                return once(use_json, token_field, None)
             if response.status_code == 400 and use_json:
                 body = response.text.lower()
                 if "response_format" in body or "json" in body:
-                    return once(False, token_field)
+                    return once(False, token_field, reasoning)
             if response.status_code == 400 and token_field == "max_tokens":
                 body = response.text.lower()
                 if "max_completion_tokens" in body or "max_tokens" in body:
-                    return once(use_json, "max_completion_tokens")
+                    return once(use_json, "max_completion_tokens", reasoning)
             self._raise_for_status(response)
             data = response.json()
             choice = (data.get("choices") or [{}])[0]
@@ -65,11 +69,14 @@ class OpenAICompatLLM:
                 )
             else:
                 text = content or ""
+            if not text.strip() and reasoning != "none" and (message.get("reasoning") or message.get("reasoning_content")):
+                return once(use_json, token_field, "none")
             if not text.strip():
                 raise ProviderError("Языковая модель вернула пустой ответ")
             return LLMResult(text=text, finish_reason=str(choice.get("finish_reason") or "stop"))
 
-        return with_retries(lambda: once(json_mode, "max_tokens"))
+        initial_reasoning = "low" if "generativelanguage.googleapis.com" in self.base_url else None
+        return with_retries(lambda: once(json_mode, "max_tokens", initial_reasoning))
 
     def _post(self, path: str, payload: dict) -> httpx.Response:
         headers = {"Content-Type": "application/json"}

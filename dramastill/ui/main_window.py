@@ -210,7 +210,7 @@ class MainWindow(QMainWindow):
             layout,
             "Главная",
             "Одна кнопка запускает историю, единственное изображение, озвучку и сборку MP4. "
-            "Картинка не сменяется: она медленно движется всю дорожку, а полоски внизу реагируют на голос.",
+            "Текст пишет бесплатная Gemini, без ключа — GPT-OSS. Картинка — Pollinations, голос — Edge.",
         )
         self.create_button = QPushButton("Создать новое видео")
         self.create_button.setObjectName("primary")
@@ -249,7 +249,11 @@ class MainWindow(QMainWindow):
 
     def _build_story(self) -> QWidget:
         body, layout = self._page_body()
-        self._title(layout, "История", "Модель придумывает оригинальный сюжет и делит его на главы. Изображение при этом остаётся одно.")
+        self._title(
+            layout,
+            "История",
+            "Бесплатная Gemini 3.8 Flash придумывает сюжет. Без ключа ту же работу делает Pollinations GPT-OSS. Изображение остаётся одно.",
+        )
         box, form = self._group("Сюжет")
         self.theme = self._combo(THEMES, self.settings.story.theme)
         self.language = self._combo(LANGUAGES, self.settings.story.language)
@@ -291,14 +295,18 @@ class MainWindow(QMainWindow):
 
     def _build_image(self) -> QWidget:
         body, layout = self._page_body()
-        self._title(layout, "Изображение", "На проект создаётся ровно одна картинка 16:9. Внешность персонажей фиксируется в её описании.")
+        self._title(
+            layout,
+            "Изображение",
+            "Одна картинка 16:9 рисуется бесплатной моделью Pollinations Sana. Ключ не нужен. Внешность персонажей входит в этот единственный запрос.",
+        )
         box, form = self._group("Провайдер")
         self.image_provider = self._combo([(key, label) for key, label, _url, _model in IMAGE_PRESETS], self.settings.image.provider)
         self.image_url = QLineEdit(self.settings.image.base_url)
         self.image_model = QLineEdit(self.settings.image.model)
         self.image_size = QComboBox()
         self.image_size.setEditable(True)
-        for size in ("1792x1024", "1536x1024", "1024x1024"):
+        for size in ("1280x720", "1024x576", "1792x1024", "1536x1024", "1024x1024"):
             self.image_size.addItem(size)
         self.image_size.setCurrentText(self.settings.image.size)
         self.image_style = self._combo([(key, label) for key, label, _prompt in IMAGE_STYLES], self.settings.image.style)
@@ -329,7 +337,11 @@ class MainWindow(QMainWindow):
 
     def _build_voice(self) -> QWidget:
         body, layout = self._page_body()
-        self._title(layout, "Озвучка", "Длинный текст читается частями и склеивается в одну дорожку. Язык речи совпадает с языком истории.")
+        self._title(
+            layout,
+            "Озвучка",
+            "Голос по умолчанию — бесплатная нейросеть Edge: русский, испанский, узбекский и английский. Длинный текст читается частями и склеивается в одну дорожку.",
+        )
         box, form = self._group("Голос")
         self.tts_provider = self._combo([(key, label) for key, label, _url, _model in TTS_PRESETS], self.settings.voice.provider)
         self.tts_url = QLineEdit(self.settings.voice.base_url)
@@ -515,9 +527,15 @@ class MainWindow(QMainWindow):
 
     def _build_api(self) -> QWidget:
         body, layout = self._page_body()
-        self._title(layout, "API и ключи", "Ключи хранятся отдельно от проектов и не пишутся в журнал. Edge TTS работает без ключа.")
+        self._title(
+            layout,
+            "API и ключи",
+            "Бесплатный маршрут ключей не требует. Ключ Gemini с aistudio.google.com/apikey включает более сильный текст. "
+            "Ключи не пишутся в журнал.",
+        )
         self.llm_key = QLineEdit(self.secrets.get("llm"))
         self.llm_key.setEchoMode(QLineEdit.Password)
+        self.llm_key.setPlaceholderText("Необязательно: бесплатный ключ Gemini")
         self.image_key = QLineEdit(self.secrets.get("image"))
         self.image_key.setEchoMode(QLineEdit.Password)
         self.tts_key = QLineEdit(self.secrets.get("tts"))
@@ -1006,6 +1024,13 @@ class MainWindow(QMainWindow):
 
         def action() -> str:
             provider = build_image(settings, self.secrets)
+            if settings.image.provider == "pollinations":
+                import httpx
+
+                response = httpx.get(settings.image.base_url.rstrip("/") + "/models", timeout=30)
+                if response.status_code >= 400:
+                    raise RuntimeError(f"Pollinations ответил {response.status_code}")
+                return "Pollinations отвечает. Ключ не нужен, картинка при проверке не генерировалась."
             if settings.image.provider == "stability":
                 import httpx
 

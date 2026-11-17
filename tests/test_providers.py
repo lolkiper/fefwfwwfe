@@ -9,8 +9,8 @@ from PIL import Image
 from dramastill.config.defaults import AppSettings
 from dramastill.core.secrets import SecretStore
 from dramastill.providers.errors import ProviderError
-from dramastill.providers.factory import build_providers
-from dramastill.providers.image import OpenAIImageProvider, StabilityImageProvider
+from dramastill.providers.factory import build_llm, build_providers, describe_route
+from dramastill.providers.image import OpenAIImageProvider, PollinationsImageProvider, StabilityImageProvider
 from dramastill.providers.llm import AnthropicLLM, OpenAICompatLLM
 from dramastill.providers.tts import edge_prosody
 
@@ -128,6 +128,44 @@ def test_edge_tts_speaks_a_real_phrase(tmp_path):
     except Exception as exc:
         pytest.skip(f"Edge TTS недоступен: {exc}")
     assert dest.stat().st_size > 1000
+
+
+def test_pollinations_retries_then_saves_one_image(tmp_path, monkeypatch):
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
+    payload = _png()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        assert "prompt" in str(request.url)
+        assert request.url.params["model"] == "sana"
+        assert request.url.params["width"] == "1280"
+        if calls["n"] == 1:
+            return httpx.Response(503, json={"error": "busy"})
+        return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
+
+    dest = tmp_path / "still.png"
+    PollinationsImageProvider(transport=httpx.MockTransport(handler)).generate(
+        prompt="one cinematic still",
+        dest=dest,
+        size="1280x720",
+        seed=3,
+    )
+    assert calls["n"] == 2
+    assert dest.read_bytes() == payload
+
+
+def test_gemini_without_key_uses_pollinations(tmp_path):
+    secrets = SecretStore(tmp_path / "secrets")
+    settings = AppSettings()
+    provider = build_llm(settings, secrets)
+    assert provider.model == "openai-fast"
+    assert "pollinations.ai" in provider.base_url
+    assert "GPT-OSS" in describe_route(settings, secrets)
+    secrets.set("llm", "AIza-free-gemini-key")
+    paid_route = build_llm(settings, secrets)
+    assert paid_route.model == "gemini-3.8-flash"
+    assert paid_route.api_key == "AIza-free-gemini-key"
 
 
 def test_factory_uses_edge_without_key(tmp_path):

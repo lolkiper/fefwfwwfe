@@ -10,9 +10,19 @@ def test_preflight_requires_keys(tmp_path, monkeypatch):
     settings = AppSettings()
     settings.story.automatic = False
     settings.story.idea = ""
+    settings.llm.provider = "openai"
+    settings.llm.base_url = "https://api.openai.com/v1"
+    settings.image.provider = "openai"
+    settings.image.base_url = "https://api.openai.com/v1"
     problems = preflight(settings, SecretStore(tmp_path / "secrets"))
     assert any("иде" in item.lower() or "автоматическ" in item.lower() for item in problems)
     assert any("ключ" in item.lower() for item in problems)
+
+
+def test_free_defaults_do_not_ask_for_keys(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", os.environ["PATH"])
+    problems = preflight(AppSettings(), SecretStore(tmp_path / "secrets"))
+    assert not any("ключ" in item.lower() for item in problems)
 
 
 def test_window_opens_and_hides_secrets(tmp_path, monkeypatch):

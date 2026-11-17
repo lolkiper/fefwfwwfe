@@ -18,7 +18,7 @@ from dramastill.media.image_service import ensure_image
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
 from dramastill.media.tts_service import ensure_narration_audio
-from dramastill.providers.factory import Providers, build_providers
+from dramastill.providers.factory import Providers, build_providers, describe_route
 from dramastill.story.service import ensure_metadata, ensure_story
 from dramastill.util import format_clock, now_iso, safe_filename
 
@@ -63,6 +63,7 @@ def run_project(
     try:
         ffmpeg, ffprobe = resolve_ffmpeg(settings.video)
         active = providers or build_providers(settings, secrets)
+        log("info", describe_route(settings, secrets))
         story_path = work / "story.json"
         narration_path = work / "narration.txt"
         progress(0.02, "story")
