@@ -6,7 +6,9 @@ py -3 -m PyInstaller --noconfirm --clean DramaStill.spec
 if errorlevel 1 exit /b 1
 powershell -NoProfile -ExecutionPolicy Bypass -File packaging\fetch_ffmpeg.ps1 -Dest dist\DramaStill
 if errorlevel 1 exit /b 1
-powershell -NoProfile -Command "Compress-Archive -Path dist\DramaStill -DestinationPath DramaStill-windows.zip -Force"
+powershell -NoProfile -ExecutionPolicy Bypass -File packaging\pack_download.ps1 -Source dist\DramaStill -OutZip DramaStill-windows.zip
+if errorlevel 1 exit /b 1
 echo.
 echo DramaStill.exe is in dist\DramaStill\
-echo Archive: DramaStill-windows.zip
+echo Download archive: DramaStill-windows.zip
+echo Inner archive password: dramastill

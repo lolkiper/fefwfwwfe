@@ -33,7 +33,7 @@ jobs:
 
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path dist/DramaStill -DestinationPath DramaStill-windows.zip -Force
+        run: ./packaging/pack_download.ps1 -Source dist/DramaStill -OutZip DramaStill-windows.zip
 
       - uses: actions/upload-artifact@v4
         with:

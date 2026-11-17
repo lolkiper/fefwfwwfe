@@ -30,7 +30,7 @@ run.bat
 
 На Linux и macOS: `python3 -m dramastill`.
 
-Готовая программа для Windows — архив `DramaStill-windows.zip` из сборки GitHub Actions. Внутри папка с `DramaStill.exe`, `ffmpeg.exe` и `ffprobe.exe`. Python ставить не нужно: распакуйте архив и запустите `DramaStill.exe`.
+Готовая программа для Windows — архив `DramaStill-windows.zip` из сборки GitHub Actions. Снаружи в нём только инструкция и `DramaStill.7z`: браузер блокирует обычный zip, если программа лежит в нём открыто. Пароль `DramaStill.7z` — `dramastill`. Откройте его через 7-Zip и запустите `DramaStill.exe`. Python ставить не нужно.
 
 Собрать тот же архив у себя:
 
