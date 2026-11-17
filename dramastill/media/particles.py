@@ -72,24 +72,41 @@ def build_particles(settings: VideoSettings, seed_text: str) -> list[Particle]:
     rng = np.random.default_rng(seed)
     particles: list[Particle] = []
     if settings.sparks:
-        count = max(8, int(72 * settings.spark_density))
+        count = max(20, int(110 * settings.spark_density))
         for _ in range(count):
+            particles.append(_spark(rng, settings, float(rng.uniform(0, 1)), float(rng.uniform(0, 1)), 0.0))
+        showers = max(3, int(5 * settings.spark_density))
+        for _ in range(showers):
+            origin_x = float(rng.uniform(0.04, 0.96))
+            origin_y = float(rng.uniform(0.04, 0.96))
+            for _ember in range(4):
+                particles.append(
+                    _spark(
+                        rng,
+                        settings,
+                        origin_x + float(rng.uniform(-0.04, 0.04)),
+                        origin_y + float(rng.uniform(-0.03, 0.03)),
+                        0.35,
+                    )
+                )
+        flashes = max(8, int(16 * settings.spark_density))
+        for _ in range(flashes):
             particles.append(
                 Particle(
-                    x0=float(rng.uniform(0, 1)),
-                    y0=float(rng.uniform(0, 1)),
-                    ax=float(rng.uniform(0.012, 0.055)),
-                    ay=float(rng.uniform(0.02, 0.07)),
-                    fx=int(rng.integers(1, 4)),
-                    fy=int(rng.integers(1, 3)),
+                    x0=float(rng.uniform(0.02, 0.98)),
+                    y0=float(rng.uniform(0.02, 0.98)),
+                    ax=float(rng.uniform(0.004, 0.02)),
+                    ay=float(rng.uniform(0.004, 0.018)),
+                    fx=1,
+                    fy=1,
                     phx=float(rng.uniform(0, math.tau)),
                     phy=float(rng.uniform(0, math.tau)),
-                    fo=int(rng.integers(1, 5)),
+                    fo=int(rng.integers(1, 4)),
                     pho=float(rng.uniform(0, math.tau)),
-                    radius=float(rng.uniform(1.1, 2.8)),
-                    color=_warm(rng),
-                    strength=float(settings.spark_opacity),
-                    kind="spark",
+                    radius=float(rng.uniform(14, 58)),
+                    color=_flash_color(rng),
+                    strength=min(1.15, float(settings.spark_opacity) * 1.25),
+                    kind="flash",
                 )
             )
     if settings.dust:
@@ -114,7 +131,7 @@ def build_particles(settings: VideoSettings, seed_text: str) -> list[Particle]:
                 )
             )
     if settings.lights:
-        for x0, y0 in ((0.12, 0.18), (0.86, 0.16), (0.84, 0.78)):
+        for x0, y0 in ((0.08, 0.14), (0.9, 0.12), (0.88, 0.82), (0.1, 0.78), (0.5, 0.08)):
             particles.append(
                 Particle(
                     x0=x0,
@@ -144,11 +161,14 @@ def position(particle: Particle, t: float, duration: float) -> tuple[float, floa
 
 def presence(particle: Particle, t: float, duration: float, x: float, y: float) -> float:
     fade = 0.5 + 0.5 * math.sin(math.tau * particle.fo * t / duration + particle.pho)
-    fade = fade**1.8
+    if particle.kind == "flash":
+        fade = fade**6.5
+    else:
+        fade = fade**1.8
     dx = (x - 0.50) / 0.22
     dy = (y - 0.40) / 0.30
     face = math.exp(-(dx * dx + dy * dy))
-    mask = 1.0 - 0.94 * face
+    mask = 1.0 - (0.8 if particle.kind == "flash" else 0.94) * face
     if particle.kind == "light":
         mask = min(mask, 0.45)
     return fade * mask * particle.strength
@@ -253,6 +273,36 @@ def _stamp(frame: np.ndarray, kernel: np.ndarray, x: float, y: float, color: tup
     frame[y0:y1, x0:x1] += patch[:, :, None] * color_array
 
 
+def _spark(rng: np.random.Generator, settings: VideoSettings, x0: float, y0: float, lift: float) -> Particle:
+    return Particle(
+        x0=min(0.99, max(0.01, x0)),
+        y0=min(0.99, max(0.01, y0)),
+        ax=float(rng.uniform(0.01, 0.05)),
+        ay=float(rng.uniform(0.02, 0.08 + lift)),
+        fx=int(rng.integers(1, 4)),
+        fy=int(rng.integers(1, 3)),
+        phx=float(rng.uniform(0, math.tau)),
+        phy=float(rng.uniform(0, math.tau)),
+        fo=int(rng.integers(1, 6)),
+        pho=float(rng.uniform(0, math.tau)),
+        radius=float(rng.uniform(1.6, 4.6)),
+        color=_warm(rng),
+        strength=float(settings.spark_opacity),
+        kind="spark",
+    )
+
+
+def _flash_color(rng: np.random.Generator) -> tuple[float, float, float]:
+    choice = int(rng.integers(0, 4))
+    if choice == 0:
+        return (1.0, 0.98, 0.92)
+    if choice == 1:
+        return (1.0, 0.82, 0.45)
+    if choice == 2:
+        return (1.0, 0.64, 0.28)
+    return (0.82, 0.9, 1.0)
+
+
 def _warm(rng: np.random.Generator) -> tuple[float, float, float]:
     choice = int(rng.integers(0, 3))
     if choice == 0:
@@ -284,5 +334,6 @@ def _signature(settings: VideoSettings, seed_text: str) -> dict:
         "spark_opacity": round(float(settings.spark_opacity), 3),
         "dust_opacity": round(float(settings.dust_opacity), 3),
         "light_opacity": round(float(settings.light_opacity), 3),
+        "layer": 2,
     }
 

@@ -45,19 +45,28 @@ def motion_expressions(settings: VideoSettings, start_frame: int, fps: int) -> t
     def cycles(period: float) -> str:
         return f"{(fps * period):.4f}"
 
+    def drift(amplitude: float, period: float, places: int) -> str:
+        slow = max(period * 2.35, 36.0)
+        main = amplitude * 0.72
+        glide = amplitude * 0.28
+        return (
+            f"{main:.{places}f}*sin(2*PI*(on+{origin})/{cycles(period)})"
+            f"+{glide:.{places}f}*sin(2*PI*(on+{origin})/{cycles(slow)})"
+        )
+
     z = (
         f"{plan['base']:.5f}"
-        f"+{plan['amplitude']:.5f}*sin(2*PI*(on+{origin})/{cycles(z_period)})"
-        f"+{plan['secondary']:.5f}*sin(2*PI*(on+{origin})/{cycles(z_period * 1.73)})"
+        f"+{drift(plan['amplitude'], z_period, 5)}"
+        f"+{drift(plan['secondary'], z_period * 1.73, 5)}"
     )
     x = (
         "iw/2-(iw/zoom/2)"
-        f"+{plan['pan_x']:.3f}*sin(2*PI*(on+{origin})/{cycles(x_period)})"
-        f"+{plan['shake']:.3f}*sin(2*PI*(on+{origin})/{cycles(shake_period)})"
+        f"+{drift(plan['pan_x'], x_period, 3)}"
+        f"+{drift(plan['shake'] * 0.55, max(shake_period, 5.5), 3)}"
     )
     y = (
         "ih/2-(ih/zoom/2)"
-        f"+{plan['pan_y']:.3f}*sin(2*PI*(on+{origin})/{cycles(y_period)})"
-        f"+{(plan['shake'] * 0.65):.3f}*sin(2*PI*(on+{origin})/{cycles(shake_period * 1.37)})"
+        f"+{drift(plan['pan_y'], y_period, 3)}"
+        f"+{drift(plan['shake'] * 0.4, max(shake_period * 1.37, 6.5), 3)}"
     )
     return z, x, y

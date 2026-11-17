@@ -208,22 +208,24 @@ class VideoSettings:
     x264_preset: str = "veryfast"
     chunk_seconds: int = 120
     preset: str = "cinematic"
-    zoom_base: float = 1.08
-    zoom_amplitude: float = 0.028
-    zoom_period: float = 78.0
-    pan_x_px: float = 26.0
-    pan_y_px: float = 14.0
-    pan_period_x: float = 62.0
-    pan_period_y: float = 84.0
-    shake_px: float = 2.4
-    shake_period: float = 3.1
+    zoom_base: float = 1.075
+    zoom_amplitude: float = 0.02
+    zoom_period: float = 120.0
+    pan_x_px: float = 32.0
+    pan_y_px: float = 18.0
+    pan_period_x: float = 108.0
+    pan_period_y: float = 146.0
+    shake_px: float = 1.1
+    shake_period: float = 8.5
     sparks: bool = True
     dust: bool = True
     lights: bool = True
-    spark_density: float = 0.75
-    spark_opacity: float = 0.7
-    dust_opacity: float = 0.38
-    light_opacity: float = 0.18
+    spark_density: float = 1.2
+    spark_opacity: float = 0.88
+    dust_opacity: float = 0.42
+    light_opacity: float = 0.24
+    intro_path: str = ""
+    outro_path: str = ""
     vignette: float = 0.35
     grade_contrast: float = 1.04
     grade_saturation: float = 1.05
@@ -289,55 +291,55 @@ def style_prompt(style_id: str) -> str:
 
 EFFECT_PRESETS: dict[str, dict] = {
     "subtle": {
-        "zoom_base": 1.07,
-        "zoom_amplitude": 0.018,
-        "zoom_period": 90.0,
-        "pan_x_px": 16.0,
-        "pan_y_px": 8.0,
-        "pan_period_x": 70.0,
-        "pan_period_y": 96.0,
-        "shake_px": 1.2,
-        "shake_period": 3.4,
-        "spark_density": 0.4,
-        "spark_opacity": 0.5,
+        "zoom_base": 1.06,
+        "zoom_amplitude": 0.014,
+        "zoom_period": 140.0,
+        "pan_x_px": 22.0,
+        "pan_y_px": 12.0,
+        "pan_period_x": 130.0,
+        "pan_period_y": 168.0,
+        "shake_px": 0.6,
+        "shake_period": 11.0,
+        "spark_density": 0.7,
+        "spark_opacity": 0.62,
         "dust_opacity": 0.28,
-        "light_opacity": 0.12,
+        "light_opacity": 0.14,
         "visualizer_opacity": 0.55,
         "visualizer_height": 120,
         "vignette": 0.25,
     },
     "cinematic": {
-        "zoom_base": 1.08,
-        "zoom_amplitude": 0.028,
-        "zoom_period": 78.0,
-        "pan_x_px": 26.0,
-        "pan_y_px": 14.0,
-        "pan_period_x": 62.0,
-        "pan_period_y": 84.0,
-        "shake_px": 2.4,
-        "shake_period": 3.1,
-        "spark_density": 0.75,
-        "spark_opacity": 0.7,
-        "dust_opacity": 0.38,
-        "light_opacity": 0.18,
+        "zoom_base": 1.075,
+        "zoom_amplitude": 0.02,
+        "zoom_period": 120.0,
+        "pan_x_px": 32.0,
+        "pan_y_px": 18.0,
+        "pan_period_x": 108.0,
+        "pan_period_y": 146.0,
+        "shake_px": 1.1,
+        "shake_period": 8.5,
+        "spark_density": 1.2,
+        "spark_opacity": 0.88,
+        "dust_opacity": 0.42,
+        "light_opacity": 0.24,
         "visualizer_opacity": 0.72,
         "visualizer_height": 150,
         "vignette": 0.35,
     },
     "dramatic": {
         "zoom_base": 1.09,
-        "zoom_amplitude": 0.038,
-        "zoom_period": 64.0,
-        "pan_x_px": 36.0,
-        "pan_y_px": 18.0,
-        "pan_period_x": 50.0,
-        "pan_period_y": 72.0,
-        "shake_px": 3.2,
-        "shake_period": 2.6,
-        "spark_density": 1.0,
-        "spark_opacity": 0.82,
-        "dust_opacity": 0.48,
-        "light_opacity": 0.26,
+        "zoom_amplitude": 0.03,
+        "zoom_period": 96.0,
+        "pan_x_px": 42.0,
+        "pan_y_px": 22.0,
+        "pan_period_x": 84.0,
+        "pan_period_y": 118.0,
+        "shake_px": 1.8,
+        "shake_period": 6.5,
+        "spark_density": 1.65,
+        "spark_opacity": 0.95,
+        "dust_opacity": 0.5,
+        "light_opacity": 0.32,
         "visualizer_opacity": 0.84,
         "visualizer_height": 170,
         "vignette": 0.42,
@@ -350,10 +352,10 @@ EFFECT_PRESETS: dict[str, dict] = {
         "pan_y_px": 12.0,
         "pan_period_x": 74.0,
         "pan_period_y": 90.0,
-        "shake_px": 1.6,
-        "shake_period": 3.6,
-        "spark_density": 0.35,
-        "spark_opacity": 0.45,
+        "shake_px": 0.9,
+        "shake_period": 9.5,
+        "spark_density": 0.9,
+        "spark_opacity": 0.7,
         "dust_opacity": 0.7,
         "light_opacity": 0.22,
         "visualizer_opacity": 0.62,
@@ -366,10 +368,10 @@ EFFECT_PRESETS: dict[str, dict] = {
         "zoom_period": 110.0,
         "pan_x_px": 10.0,
         "pan_y_px": 6.0,
-        "pan_period_x": 100.0,
-        "pan_period_y": 120.0,
-        "shake_px": 0.8,
-        "shake_period": 4.0,
+        "pan_period_x": 150.0,
+        "pan_period_y": 180.0,
+        "shake_px": 0.4,
+        "shake_period": 12.0,
         "spark_density": 0.2,
         "spark_opacity": 0.35,
         "dust_opacity": 0.18,

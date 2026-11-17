@@ -398,7 +398,7 @@ class MainWindow(QMainWindow):
 
     def _build_video(self) -> QWidget:
         body, layout = self._page_body()
-        self._title(layout, "Видео", "Единственный кадр медленно дышит зумом и сдвигом. Искры и полоски настраиваются отдельно.")
+        self._title(layout, "Видео", "Единственный кадр плавно плывёт. Ниже настраиваются искры, вспышки и свои фрагменты в начало и конец.")
         video = self.settings.video
         box, form = self._group("Файл")
         self.resolution = self._combo([(name, name) for name, _w, _h in RESOLUTIONS], _resolution_name(video.width, video.height))
@@ -461,7 +461,7 @@ class MainWindow(QMainWindow):
         self.pan_period_x = self._float(15, 180, video.pan_period_x, 1, 1)
         self.pan_period_y = self._float(15, 180, video.pan_period_y, 1, 1)
         self.shake = self._float(0, 8, video.shake_px, 0.1, 2)
-        self.shake_period = self._float(0.8, 8, video.shake_period, 0.1, 2)
+        self.shake_period = self._float(0.8, 24, video.shake_period, 0.1, 2)
         motion_form.addRow("Готовый пресет", self.effect_preset)
         motion_form.addRow("Базовый зум", self.zoom_base)
         motion_form.addRow("Амплитуда зума", self.zoom_amp)
@@ -488,7 +488,7 @@ class MainWindow(QMainWindow):
         flag_row.addWidget(self.sparks)
         flag_row.addWidget(self.dust)
         flag_row.addWidget(self.lights)
-        self.spark_density = self._float(0.1, 1.5, video.spark_density, 0.05)
+        self.spark_density = self._float(0.1, 2.5, video.spark_density, 0.05)
         self.spark_opacity = self._float(0.05, 1.0, video.spark_opacity, 0.05)
         self.dust_opacity = self._float(0.0, 1.0, video.dust_opacity, 0.05)
         self.light_opacity = self._float(0.0, 0.6, video.light_opacity, 0.02)
@@ -519,6 +519,18 @@ class MainWindow(QMainWindow):
         effect_form.addRow("Промежуток", self.bar_gap)
         effect_form.addRow("Плавность", self.bar_smooth)
         layout.addWidget(effects)
+
+        clips, clip_form = self._group("Свои фрагменты")
+        self.intro_path = QLineEdit(video.intro_path)
+        self.intro_path.setPlaceholderText("Видео с компьютера в начало ролика")
+        self.outro_path = QLineEdit(video.outro_path)
+        self.outro_path.setPlaceholderText("Видео с компьютера в конец ролика")
+        clip_form.addRow("Начало", self._clip_row(self.intro_path, "Фрагмент в начало"))
+        clip_form.addRow("Конец", self._clip_row(self.outro_path, "Фрагмент в конец"))
+        note = QLabel("Пустое поле — без вставки. Фрагмент подгоняется под размер ролика. Картинка истории остаётся одной.")
+        note.setWordWrap(True)
+        clip_form.addRow("", note)
+        layout.addWidget(clips)
         save = QPushButton("Сохранить настройки")
         save.clicked.connect(self.persist)
         layout.addWidget(save)
@@ -675,6 +687,8 @@ class MainWindow(QMainWindow):
         settings.video.visualizer_height = self.bar_height.value()
         settings.video.visualizer_gap = self.bar_gap.value()
         settings.video.visualizer_smooth = self.bar_smooth.value()
+        settings.video.intro_path = self.intro_path.text().strip()
+        settings.video.outro_path = self.outro_path.text().strip()
         return settings
 
     def _load(self, settings: AppSettings) -> None:
@@ -1074,6 +1088,30 @@ class MainWindow(QMainWindow):
         thread.failed.connect(lambda message: QMessageBox.warning(self, "Проверка", message))
         thread.start()
         self._tasks.append(thread)
+
+    def _clip_row(self, field: QLineEdit, title: str) -> QWidget:
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        pick = QPushButton("Файл")
+        clear = QPushButton("Убрать")
+        pick.clicked.connect(lambda: self._browse_clip(field, title))
+        clear.clicked.connect(field.clear)
+        layout.addWidget(field)
+        layout.addWidget(pick)
+        layout.addWidget(clear)
+        return row
+
+    def _browse_clip(self, field: QLineEdit, title: str) -> None:
+        start = field.text().strip() or self.output_dir.text()
+        path, _selected = QFileDialog.getOpenFileName(
+            self,
+            title,
+            start,
+            "Видео (*.mp4 *.mov *.mkv *.webm *.avi *.m4v *.wmv);;Все файлы (*.*)",
+        )
+        if path:
+            field.setText(path)
 
     def _browse_output(self) -> None:
         path = QFileDialog.getExistingDirectory(self, "Папка для видео", self.output_dir.text())

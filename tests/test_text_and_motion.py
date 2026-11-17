@@ -4,7 +4,7 @@ import pytest
 
 from dramastill.config.defaults import VideoSettings
 from dramastill.media.motion import motion_expressions
-from dramastill.media.particles import LOOP_SECONDS, Particle, position, presence, render_particle_frame
+from dramastill.media.particles import LOOP_SECONDS, Particle, build_particles, position, presence, render_particle_frame
 from dramastill.story.textutil import extract_json, pack_sentences, split_sentences
 
 
@@ -28,6 +28,7 @@ def test_motion_expressions_have_no_commas_and_continue():
     first = "".join(motion_expressions(settings, 0, 30))
     later = "".join(motion_expressions(settings, 240, 30))
     assert "," not in first
+    assert first.count("sin(") >= 8
     assert "on+0" in first
     assert "on+240" in later
 
@@ -41,4 +42,22 @@ def test_particles_loop_and_avoid_the_center():
     frame_start = render_particle_frame([spark], 80, 48, 0, LOOP_SECONDS, {})
     frame_end = render_particle_frame([spark], 80, 48, LOOP_SECONDS, LOOP_SECONDS, {})
     assert frame_start.shape == frame_end.shape
+    assert int(abs(frame_start.astype(int) - frame_end.astype(int)).mean()) == 0
+
+
+def test_flashes_are_brief_and_the_layer_loops():
+    settings = VideoSettings()
+    particles = build_particles(settings, "уникальный сюжет")
+    sparks = [item for item in particles if item.kind == "spark"]
+    flashes = [item for item in particles if item.kind == "flash"]
+    assert len(sparks) >= 100
+    assert len(flashes) >= 8
+    flash = flashes[0]
+    assert position(flash, 0, LOOP_SECONDS) == pytest.approx(position(flash, LOOP_SECONDS, LOOP_SECONDS))
+    peak = Particle(0.08, 0.08, 0, 0, 1, 1, 0, 0, 1, math.pi / 2, 20, (1, 1, 1), 1, "flash")
+    bright = presence(peak, 0, LOOP_SECONDS, 0.08, 0.08)
+    quiet = presence(peak, 2, LOOP_SECONDS, 0.08, 0.08)
+    assert bright > quiet * 4
+    frame_start = render_particle_frame([peak], 80, 48, 0, LOOP_SECONDS, {})
+    frame_end = render_particle_frame([peak], 80, 48, LOOP_SECONDS, LOOP_SECONDS, {})
     assert int(abs(frame_start.astype(int) - frame_end.astype(int)).mean()) == 0

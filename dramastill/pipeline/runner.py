@@ -12,6 +12,7 @@ from dramastill.core.database import Database
 from dramastill.core.redact import redact
 from dramastill.core.secrets import SecretStore
 from dramastill.media.audio_analysis import ensure_bands
+from dramastill.media.bookends import deliver_movie
 from dramastill.media.composer import render_movie
 from dramastill.media.ffmpeg_util import FFmpegError, probe, resolve_ffmpeg
 from dramastill.media.image_service import ensure_image
@@ -152,6 +153,14 @@ def run_project(
         else:
             log("info", "Готовое видео уже собрано, повторная сборка не нужна")
 
+        delivered = deliver_movie(
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            body=final,
+            work_dir=work,
+            settings=settings.video,
+            log=log,
+        )
         progress(0.95, "publish")
         metadata = ensure_metadata(
             story=story,
@@ -165,7 +174,7 @@ def run_project(
         )
         thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or title
         thumbnail = compose_thumbnail(image, thumb_text, work / "thumbnail.jpg")
-        output = _publish(settings, title, project_id, final, thumbnail, work / "youtube.json")
+        output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
         if settings.video.cleanup_temp:
             _cleanup(work, log)
         db.update(
