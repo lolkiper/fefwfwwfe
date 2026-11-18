@@ -14,7 +14,7 @@ from dramastill.media.ffmpeg_util import (
     probe,
     run_ffmpeg,
 )
-from dramastill.media.motion import motion_expressions, motion_plan
+from dramastill.media.motion import ken_burns_filter, motion_rate
 from dramastill.media.particles import LOOP_SECONDS
 from dramastill.media.resources import chunk_workers, encode_threads
 from dramastill.media.visualizer import BarRenderer, parse_color
@@ -203,11 +203,11 @@ def _render_chunk(
     threads: int = 0,
 ) -> None:
     fps = max(8, int(settings.fps))
+    drawn = motion_rate(fps)
     duration = frames / fps
     width = even(settings.width)
     height = even(settings.height)
-    plan = motion_plan(settings)
-    z_expr, x_expr, y_expr = motion_expressions(settings, start_frame, fps)
+    origin = int(round(start_frame * drawn / fps))
     inputs = [
         ffmpeg,
         "-y",
@@ -223,13 +223,12 @@ def _render_chunk(
         "-loop",
         "1",
         "-framerate",
-        str(fps),
+        str(drawn),
         "-i",
         str(image),
     ]
-    filter_inputs = ["[0:v]"]
-    next_index = 1
     particle_index = None
+    next_index = 1
     if particles is not None:
         particle_offset = (start_frame / fps) % LOOP_SECONDS
         inputs.extend(["-stream_loop", "-1", "-ss", f"{particle_offset:.3f}", "-i", str(particles)])
@@ -259,10 +258,8 @@ def _render_chunk(
         visual_index = next_index
     graph = _filter_graph(
         settings=settings,
-        plan=plan,
-        z_expr=z_expr,
-        x_expr=x_expr,
-        y_expr=y_expr,
+        motion=ken_burns_filter(settings, origin, drawn, width, height),
+        drawn=drawn,
         fps=fps,
         width=width,
         height=height,
@@ -345,10 +342,8 @@ def _replace_video_codec(cmd: list[str], video_args: list[str]) -> list[str]:
 def _filter_graph(
     *,
     settings: VideoSettings,
-    plan: dict,
-    z_expr: str,
-    x_expr: str,
-    y_expr: str,
+    motion: str,
+    drawn: int,
     fps: int,
     width: int,
     height: int,
@@ -358,26 +353,20 @@ def _filter_graph(
     visual_index: int | None,
     visual_height: int,
 ) -> str:
-    filters = [
-        (
-            f"[0:v]scale={plan['pre_w']}:{plan['pre_h']}:force_original_aspect_ratio=increase:flags=lanczos,"
-            f"crop={plan['pre_w']}:{plan['pre_h']},"
-            f"zoompan=z='{z_expr}':x='{x_expr}':y='{y_expr}':d=1:s={width}x{height}:fps={fps}"
-        )
-    ]
+    filters = [f"[0:v]{motion}"]
     if settings.vignette > 0.01:
         angle = min(1.2, max(0.05, settings.vignette))
         filters.append(f"vignette=PI*{angle:.3f}")
     if abs(settings.grade_contrast - 1) > 0.001 or abs(settings.grade_saturation - 1) > 0.001:
         filters.append(f"eq=contrast={settings.grade_contrast:.3f}:saturation={settings.grade_saturation:.3f}")
-    filters.append("format=gbrp[base]")
+    filters.append("format=gbrp[base]" if particle_index is not None else f"fps={fps},format=yuv420p[base]")
     current = "[base]"
     parts = [",".join(filters)]
     if particle_index is not None:
         parts.append(
-            f"[{particle_index}:v]scale={width}:{height}:flags=bilinear,fps={fps},format=gbrp[par]"
+            f"[{particle_index}:v]fps={drawn},scale={width}:{height}:flags=bilinear,format=gbrp[par]"
         )
-        parts.append(f"{current}[par]blend=all_mode=screen:shortest=1[withpar]")
+        parts.append(f"{current}[par]blend=all_mode=screen:shortest=1,fps={fps}[withpar]")
         current = "[withpar]"
     if visual_index is not None:
         top = height - visual_height

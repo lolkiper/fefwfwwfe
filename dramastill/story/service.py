@@ -45,6 +45,7 @@ def ensure_story(
     progress: Progress,
     temperature: float,
     max_tokens: int,
+    on_chapter_final: Callable[[dict], None] | None = None,
 ) -> dict:
     _bind_llm(llm, token, log)
     story = load_story(path)
@@ -72,6 +73,8 @@ def ensure_story(
             chapter["summary_actual"] = summary
         save_story(path, story)
         progress(0.18 + 0.62 * ((index + 1) / len(outlines)), "story")
+        if not settings.consistency_check:
+            _publish_ready(on_chapter_final, outlines, settings)
 
     if settings.consistency_check and not story.get("consistency_done"):
         language_line = language_instruction(settings.language, settings.custom_language)
@@ -95,6 +98,7 @@ def ensure_story(
                 log("info", f"Глава {chapter.get('index', index + 1)} поправлена после проверки")
             chapter["consistency_done"] = True
             save_story(path, story)
+            _publish_ready(on_chapter_final, outlines, settings)
             progress(0.82 + 0.18 * ((index + 1) / len(outlines)), "story")
         story["consistency_done"] = True
         save_story(path, story)
@@ -108,6 +112,20 @@ def ensure_story(
     save_story(path, story)
     progress(1.0, "story")
     return story
+
+
+def _publish_ready(callback: Callable[[dict], None] | None, outlines: list, settings: StorySettings) -> None:
+    if callback is None:
+        return
+    ready = []
+    for chapter in outlines:
+        if not (chapter.get("narration") or "").strip():
+            continue
+        if settings.consistency_check and not chapter.get("consistency_done"):
+            continue
+        ready.append(dict(chapter))
+    if ready:
+        callback({"chapters": ready})
 
 
 def ensure_metadata(

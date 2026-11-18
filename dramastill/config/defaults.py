@@ -241,6 +241,14 @@ class VideoSettings:
     cleanup_temp: bool = True
     max_parallel_projects: int = 2
     performance_mode: str = "balanced"
+    cooling_mode: str = ""
+    temp_warning_c: int = 72
+    temp_limit_c: int = 82
+    max_cpu_percent: int = 0
+    max_gpu_percent: int = 0
+    max_ram_mb: int = 0
+    worker_urls: str = ""
+    worker_token: str = ""
     render_mode: str = "fast"
     cpu_threads: int = 0
     memory_limit_percent: int = 90

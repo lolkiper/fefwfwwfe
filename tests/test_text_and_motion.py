@@ -23,14 +23,24 @@ def test_sentences_pack_without_losing_words():
     assert "вопросом?" in " ".join(packed)
 
 
+def test_motion_rate_repeats_frames_only_at_video_rates():
+    from dramastill.media.motion import motion_rate
+
+    assert motion_rate(30) == 12
+    assert motion_rate(24) == 12
+    assert motion_rate(20) == 20
+    assert motion_rate(12) == 12
+
+
 def test_motion_expressions_have_no_commas_and_continue():
     settings = VideoSettings()
     first = "".join(motion_expressions(settings, 0, 30))
     later = "".join(motion_expressions(settings, 240, 30))
     assert "," not in first
     assert first.count("sin(") >= 8
-    assert "on+0" in first
-    assert "on+240" in later
+    assert "n+0" in first
+    assert "n+240" in later
+    assert "zoompan" not in first
 
 
 def test_particles_loop_and_avoid_the_center():

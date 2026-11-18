@@ -16,11 +16,11 @@ from dramastill.media.audio_analysis import ensure_bands
 from dramastill.media.bookends import deliver_movie
 from dramastill.media.composer import render_movie
 from dramastill.media.ffmpeg_util import FFmpegError, probe, resolve_ffmpeg
-from dramastill.media.resources import chunk_workers, project_slots
+from dramastill.media.resources import chunk_workers, cooling_decision, project_slots
 from dramastill.media.image_service import ensure_image
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
-from dramastill.media.tts_service import ensure_narration_audio
+from dramastill.media.tts_service import ChapterAudioPrefetch, ensure_narration_audio
 from dramastill.providers.factory import Providers, build_providers, describe_route
 from dramastill.story.service import ensure_metadata, ensure_story
 from dramastill.util import format_clock, now_iso, safe_filename
@@ -67,26 +67,55 @@ def run_project(
         ffmpeg, ffprobe = resolve_ffmpeg(settings.video)
         active = providers or build_providers(settings, secrets)
         log("info", describe_route(settings, secrets))
+        cooling = cooling_decision(settings.video)
+        log("info", cooling.summary)
         log(
             "info",
             "Скорость: "
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
-            f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}.",
+            f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
+            "Картинка двигается через scale и crop, без zoompan. "
+            "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
         story_path = work / "story.json"
         narration_path = work / "narration.txt"
         progress(0.02, "story")
-        story = ensure_story(
-            settings=settings.story,
-            llm=active.llm,
-            path=story_path,
-            narration_path=narration_path,
+        prefetch = ChapterAudioPrefetch(
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            provider=active.tts,
+            settings=settings.voice,
+            work_dir=work,
             token=token,
             log=log,
-            progress=lambda fraction, stage: progress(0.02 + 0.20 * fraction, stage),
-            temperature=settings.llm.temperature,
-            max_tokens=settings.llm.max_tokens,
         )
+        story_error: Exception | None = None
+        try:
+            story = ensure_story(
+                settings=settings.story,
+                llm=active.llm,
+                path=story_path,
+                narration_path=narration_path,
+                token=token,
+                log=log,
+                progress=lambda fraction, stage: progress(0.02 + 0.20 * fraction, stage),
+                temperature=settings.llm.temperature,
+                max_tokens=settings.llm.max_tokens,
+                on_chapter_final=prefetch.submit,
+            )
+        except Exception as exc:
+            story_error = exc
+            story = None
+        prefetch_error: Exception | None = None
+        try:
+            prefetch.wait()
+        except Exception as exc:
+            prefetch_error = exc
+        if story_error is not None:
+            raise story_error
+        if prefetch_error is not None:
+            raise prefetch_error
+        assert story is not None
         title = str(story.get("title") or project.title)
         db.update(project_id, title=title)
         if callbacks is not None:

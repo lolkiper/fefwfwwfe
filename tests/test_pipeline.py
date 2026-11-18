@@ -154,7 +154,7 @@ def test_pipeline_creates_one_image_and_resumes(tmp_path, monkeypatch):
         raise AssertionError("first run should stop on the voice failure")
     failed = db.get(project.id)
     assert failed.status == "failed"
-    assert image.calls == 1
+    assert image.calls == 0
     speech = Path(project.work_dir) / "audio" / "speech" / "00000.mp3"
     assert speech.exists()
     spoken_before = len(voice.calls)

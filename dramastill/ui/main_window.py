@@ -440,13 +440,13 @@ class MainWindow(QMainWindow):
         form.addRow("Пресет x264", self.x264_preset)
         form.addRow("Длина фрагмента", self.chunk_seconds)
         form.addRow("Проектов сразу", self.parallel_projects)
-        self.performance_mode = self._combo(
+        self.cooling_mode = self._combo(
             [
-                ("low", "Низкая нагрузка"),
-                ("balanced", "Баланс"),
-                ("maximum", "Максимальная скорость"),
+                ("eco", "Эко: минимальный нагрев"),
+                ("balanced", "Баланс: скорость и температура"),
+                ("cool", "Холодная скорость"),
             ],
-            video.performance_mode,
+            video.cooling_mode or {"low": "eco", "maximum": "cool"}.get(video.performance_mode, "balanced"),
         )
         self.render_mode = self._combo(
             [
@@ -459,10 +459,35 @@ class MainWindow(QMainWindow):
         self.cpu_threads.setSpecialValueText("авто")
         self.memory_limit = self._int(60, 95, video.memory_limit_percent)
         self.memory_limit.setSuffix(" %")
-        form.addRow("Режим нагрузки", self.performance_mode)
+        self.max_cpu = self._int(0, 100, video.max_cpu_percent)
+        self.max_cpu.setSpecialValueText("авто")
+        self.max_cpu.setSuffix(" %")
+        self.max_gpu = self._int(0, 100, video.max_gpu_percent)
+        self.max_gpu.setSpecialValueText("авто")
+        self.max_gpu.setSuffix(" %")
+        self.max_ram = self._int(0, 65536, video.max_ram_mb)
+        self.max_ram.setSpecialValueText("авто")
+        self.max_ram.setSuffix(" МБ")
+        self.temp_warning = self._int(45, 90, video.temp_warning_c)
+        self.temp_warning.setSuffix(" °C")
+        self.temp_limit = self._int(60, 95, video.temp_limit_c)
+        self.temp_limit.setSuffix(" °C")
+        self.worker_urls = QLineEdit(video.worker_urls)
+        self.worker_urls.setPlaceholderText("http://192.168.1.20:8765, http://server-2:8765")
+        self.worker_token = QLineEdit(video.worker_token)
+        self.worker_token.setEchoMode(QLineEdit.EchoMode.Password)
+        self.worker_token.setPlaceholderText("один и тот же секрет на компьютере и серверах")
+        form.addRow("Охлаждение", self.cooling_mode)
         form.addRow("Режим монтажа", self.render_mode)
         form.addRow("Потоки CPU", self.cpu_threads)
-        form.addRow("Потолок памяти", self.memory_limit)
+        form.addRow("Потолок CPU", self.max_cpu)
+        form.addRow("Потолок GPU", self.max_gpu)
+        form.addRow("Потолок памяти программы", self.max_ram)
+        form.addRow("Потолок памяти компьютера", self.memory_limit)
+        form.addRow("Температура предупреждения", self.temp_warning)
+        form.addRow("Температура ограничения", self.temp_limit)
+        form.addRow("Серверы", self.worker_urls)
+        form.addRow("Токен серверов", self.worker_token)
         form.addRow("", self.cleanup)
         form.addRow("Папка экспорта", output_row)
         form.addRow("ffmpeg", self.ffmpeg_path)
@@ -683,9 +708,18 @@ class MainWindow(QMainWindow):
         settings.video.x264_preset = self.x264_preset.currentData()
         settings.video.chunk_seconds = self.chunk_seconds.value()
         settings.video.max_parallel_projects = self.parallel_projects.value()
-        settings.video.performance_mode = self.performance_mode.currentData()
+        cooling = self.cooling_mode.currentData()
+        settings.video.cooling_mode = cooling
+        settings.video.performance_mode = {"eco": "low", "cool": "maximum"}.get(cooling, "balanced")
         settings.video.render_mode = self.render_mode.currentData()
         settings.video.cpu_threads = self.cpu_threads.value()
+        settings.video.max_cpu_percent = self.max_cpu.value()
+        settings.video.max_gpu_percent = self.max_gpu.value()
+        settings.video.max_ram_mb = self.max_ram.value()
+        settings.video.temp_warning_c = self.temp_warning.value()
+        settings.video.temp_limit_c = self.temp_limit.value()
+        settings.video.worker_urls = self.worker_urls.text().strip()
+        settings.video.worker_token = self.worker_token.text().strip()
         settings.video.memory_limit_percent = self.memory_limit.value()
         settings.video.cleanup_temp = self.cleanup.isChecked()
         settings.video.output_dir = self.output_dir.text().strip()

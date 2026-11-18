@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import wave
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from dramastill.cancel import CancelToken
@@ -60,14 +61,7 @@ def ensure_narration_audio(
     return master
 
 
-def _load_or_build_plan(story: dict, settings: VoiceSettings, path: Path) -> list[dict]:
-    if path.exists():
-        try:
-            saved = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            saved = []
-        if saved:
-            return saved
+def build_plan(story: dict, settings: VoiceSettings) -> list[dict]:
     plan: list[dict] = []
     speech_index = 0
     chapters = story.get("chapters") or []
@@ -92,8 +86,82 @@ def _load_or_build_plan(story: dict, settings: VoiceSettings, path: Path) -> lis
         plan.pop()
     if not any(item["kind"] == "speech" for item in plan):
         raise ProviderError("В сценарии нет текста для озвучки")
+    return plan
+
+
+def _load_or_build_plan(story: dict, settings: VoiceSettings, path: Path) -> list[dict]:
+    if path.exists():
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            saved = []
+        if saved:
+            return saved
+    plan = build_plan(story, settings)
     path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
     return plan
+
+
+class ChapterAudioPrefetch:
+    """Speak a finished chapter while the next one is still being written."""
+
+    def __init__(self, *, ffmpeg: str, ffprobe: str, provider: TTSProvider, settings: VoiceSettings, work_dir: Path, token: CancelToken, log):
+        del ffmpeg
+        self.ffprobe = ffprobe
+        self.provider = provider
+        self.settings = settings
+        self.work_dir = work_dir
+        self.token = token
+        self.log = log
+        self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drama-voice")
+        self._future: Future | None = None
+        self._announced = False
+
+    def submit(self, story: dict) -> None:
+        snapshot = json.loads(json.dumps(story))
+        with self._lock:
+            previous = self._future
+            if previous is not None and not previous.done():
+                self._future = self._pool.submit(self._after, previous, snapshot)
+            else:
+                self._future = self._pool.submit(self._run, snapshot)
+
+    def wait(self) -> None:
+        with self._lock:
+            future = self._future
+        try:
+            if future is not None:
+                future.result()
+        finally:
+            self._pool.shutdown(wait=True)
+
+    def _after(self, previous: Future, story: dict) -> None:
+        previous.result()
+        self._run(story)
+
+    def _run(self, story: dict) -> None:
+        self.token.check()
+        try:
+            plan = build_plan(story, self.settings)
+        except ProviderError:
+            return
+        items = [item for item in plan if item["kind"] == "speech"]
+        speech_dir = self.work_dir / "audio" / "speech"
+        speech_dir.mkdir(parents=True, exist_ok=True)
+        if not self._announced:
+            self._announced = True
+            self.log("info", "Готовая глава озвучивается, пока пишется следующая")
+        _synthesize_all(
+            provider=self.provider,
+            settings=self.settings,
+            items=items,
+            speech_dir=speech_dir,
+            ffprobe=self.ffprobe,
+            token=self.token,
+            log=self.log,
+            progress=lambda _fraction: None,
+        )
 
 
 def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, log, progress) -> None:

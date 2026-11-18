@@ -95,6 +95,8 @@ def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch
     assert "thread_queue_size" not in command
     graph = command[command.index("-filter_complex") + 1]
     assert "overlay=" in graph
+    assert "eval=frame" in graph
+    assert "zoompan" not in graph
     assert graph.count("blend=all_mode=screen") == 1
 
 

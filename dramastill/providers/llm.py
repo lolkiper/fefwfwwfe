@@ -40,6 +40,12 @@ class OpenAICompatLLM:
         self.on_wait: Callable[[str], None] | None = None
         self.stop_check: Callable[[], None] | None = None
         self.model_chain: tuple[str, ...] = ()
+        self._client: httpx.Client | None = None
+
+    def _http(self) -> httpx.Client:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.Client(timeout=httpx.Timeout(300, connect=30), transport=self._transport)
+        return self._client
 
     def complete(
         self,
@@ -220,16 +226,13 @@ class OpenAICompatLLM:
         if "openrouter.ai" in self.base_url:
             headers["HTTP-Referer"] = "https://localhost/dramastill"
             headers["X-Title"] = "DramaStill"
-        timeout = httpx.Timeout(300, connect=30)
-        with httpx.Client(timeout=timeout, transport=self._transport) as client:
-            return client.post(self.base_url + path, headers=headers, json=payload)
+        return self._http().post(self.base_url + path, headers=headers, json=payload)
 
     def list_model_ids(self) -> list[str]:
         headers = {}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        with httpx.Client(timeout=httpx.Timeout(60, connect=20), transport=self._transport) as client:
-            response = client.get(self.base_url + "/models", headers=headers)
+        response = self._http().get(self.base_url + "/models", headers=headers)
         self._raise_for_status(response)
         data = response.json()
         rows = data.get("data", data if isinstance(data, list) else [])
