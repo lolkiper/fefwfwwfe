@@ -1,0 +1,12 @@
+__pycache__/
+.pytest_cache/
+*.pyc
+.venv/
+dist/
+build/
+*.spec
+!DramaStill.spec
+data/
+output/
+*.mp4
+.DS_Store
