@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - cursor/dramastill-video-studio-ac51
+      - cursor/fix-runtime-bugs-ac51
 
 permissions:
   contents: read
