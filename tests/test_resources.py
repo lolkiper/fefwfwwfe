@@ -99,6 +99,30 @@ def test_user_activity_and_ram_cap_hold_work_back():
     assert decision.projects == 0
 
 
+def test_gpu_probe_retries_after_the_cooldown(monkeypatch):
+    import dramastill.media.cooling as cooling
+
+    cooling._gpu_missing = True
+    cooling._gpu_block_until = 10**12
+    calls = []
+
+    def blocked(*_args, **_kwargs):
+        calls.append(1)
+        raise AssertionError("probe should stay cached")
+
+    monkeypatch.setattr(cooling.subprocess, "run", blocked)
+    assert cooling._gpu() == (None, None)
+    assert calls == []
+
+    class Result:
+        returncode = 0
+        stdout = "55, 10\n"
+
+    cooling._gpu_block_until = 0
+    monkeypatch.setattr(cooling.subprocess, "run", lambda *_args, **_kwargs: Result())
+    assert cooling._gpu() == (55.0, 10.0)
+
+
 def test_pan_stays_inside_the_zoom_margin():
     from dramastill.media.motion import motion_plan
 

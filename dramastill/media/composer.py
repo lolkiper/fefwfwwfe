@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -57,8 +58,27 @@ def render_movie(
     audio_dir.mkdir(parents=True, exist_ok=True)
     slices = frame_slices(total_frames, fps, max(5, int(settings.chunk_seconds)))
     manifest = chunks_dir / "manifest.json"
+    signature = _movie_signature(
+        settings=settings,
+        fps=fps,
+        total_frames=total_frames,
+        slices=slices,
+        image=image,
+        audio=audio,
+        particles=particles,
+    )
+    reusable = False
+    if manifest.exists():
+        try:
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            saved = None
+        reusable = isinstance(saved, dict) and saved.get("signature") == signature
     manifest.write_text(
-        json.dumps({"fps": fps, "frames": total_frames, "slices": slices}),
+        json.dumps(
+            {"signature": signature, "fps": fps, "frames": total_frames, "slices": signature["slices"]},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     cache: dict = {}
@@ -68,7 +88,7 @@ def render_movie(
         token.check()
         dest = chunks_dir / f"{index:05d}.mkv"
         expected = count / fps
-        if _chunk_ready(ffprobe, dest, expected):
+        if reusable and _chunk_ready(ffprobe, dest, expected):
             log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов")
             paths[index] = dest
             continue
@@ -160,7 +180,7 @@ def _chunk_ready(ffprobe: str, path: Path, expected: float) -> bool:
 
 
 def _slice_audio(ffmpeg: str, master: Path, dest: Path, start: float, duration: float) -> None:
-    if dest.exists() and dest.stat().st_size > 100:
+    if _slice_reusable(dest, master, duration):
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -379,6 +399,78 @@ def _filter_graph(
         f"apad=whole_dur={duration:.4f}[aout]"
     )
     return ";".join(parts)
+
+
+def _movie_signature(
+    *,
+    settings: VideoSettings,
+    fps: int,
+    total_frames: int,
+    slices: list[tuple[int, int]],
+    image: Path,
+    audio: Path,
+    particles: Path | None,
+) -> dict:
+    def mark(path: Path) -> list[int]:
+        stat = path.stat()
+        return [int(stat.st_size), int(stat.st_mtime)]
+
+    return {
+        "width": even(settings.width),
+        "height": even(settings.height),
+        "fps": fps,
+        "frames": total_frames,
+        "slices": [[int(start), int(count)] for start, count in slices],
+        "bitrate": settings.video_bitrate,
+        "audio_bitrate": settings.audio_bitrate,
+        "encoder": settings.encoder,
+        "preset": settings.x264_preset,
+        "visualizer": bool(settings.visualizer),
+        "bars": int(settings.visualizer_bars),
+        "color": settings.visualizer_color,
+        "opacity": f"{float(settings.visualizer_opacity):.4f}",
+        "bar_height": int(settings.visualizer_height),
+        "gap": f"{float(settings.visualizer_gap):.4f}",
+        "smooth": f"{float(settings.visualizer_smooth):.4f}",
+        "vignette": f"{float(settings.vignette):.4f}",
+        "contrast": f"{float(settings.grade_contrast):.4f}",
+        "saturation": f"{float(settings.grade_saturation):.4f}",
+        "zoom": f"{float(settings.zoom_base):.5f}/{float(settings.zoom_amplitude):.5f}/{float(settings.zoom_period):.4f}",
+        "pan": (
+            f"{float(settings.pan_x_px):.3f}/{float(settings.pan_y_px):.3f}/"
+            f"{float(settings.pan_period_x):.3f}/{float(settings.pan_period_y):.3f}"
+        ),
+        "shake": f"{float(settings.shake_px):.3f}/{float(settings.shake_period):.3f}",
+        "image": mark(image),
+        "audio": mark(audio),
+        "particles": None if particles is None else mark(particles),
+    }
+
+
+def _slice_reusable(dest: Path, master: Path, expected: float) -> bool:
+    if not dest.exists() or dest.stat().st_size <= 100:
+        return False
+    try:
+        if dest.stat().st_mtime_ns + 1_000_000 < master.stat().st_mtime_ns:
+            return False
+    except OSError:
+        return False
+    measured = _wav_seconds(dest)
+    if measured is None:
+        return False
+    return abs(measured - expected) < 0.12
+
+
+def _wav_seconds(path: Path) -> float | None:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            frames = handle.getnframes()
+    except (wave.Error, EOFError, OSError):
+        return None
+    if rate <= 0:
+        return None
+    return frames / float(rate)
 
 
 def _concat(ffmpeg: str, chunks: list[Path], dest: Path, audio_bitrate: str) -> None:

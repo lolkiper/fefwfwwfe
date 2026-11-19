@@ -25,6 +25,7 @@ def ensure_bands(
         "smooth": round(float(smooth), 3),
         "frames": n_frames,
         "audio_size": audio.stat().st_size if audio.exists() else 0,
+        "audio_mtime": int(audio.stat().st_mtime) if audio.exists() else 0,
     }
     if dest.exists() and meta_path.exists():
         try:

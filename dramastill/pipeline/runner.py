@@ -193,6 +193,7 @@ def run_project(
         output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
         if settings.video.cleanup_temp:
             _cleanup(work, log)
+        _accumulate_elapsed(db, project_id)
         db.update(
             project_id,
             status="completed",

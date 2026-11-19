@@ -162,6 +162,8 @@ def test_pipeline_creates_one_image_and_resumes(tmp_path, monkeypatch):
     output = run_project(db, project.id, SecretStore(tmp_path / "secrets"), CancelToken(), providers=providers)
     done = db.get(project.id)
     assert done.status == "completed"
+    assert done.started_at is None
+    assert done.elapsed_seconds > 0
     assert image.calls == 1
     assert voice.calls[spoken_before:] == ["00001.partial.mp3"]
     assert output.exists()

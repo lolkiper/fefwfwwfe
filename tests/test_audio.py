@@ -15,6 +15,11 @@ def test_bars_follow_real_spectrum():
     assert levels[-10:, :3].mean() > levels[-10:, -3:].mean()
 
 
+def test_bad_color_falls_back_instead_of_crashing():
+    assert parse_color("#ZZZZZZ", 1) == parse_color("#E6C36A", 1)
+    assert parse_color("nope", 1) == parse_color("#E6C36A", 1)
+
+
 def test_renderer_grows_with_level():
     color = parse_color("#FFFFFF", 1)
     renderer = BarRenderer(120, 40, color, 0.2)

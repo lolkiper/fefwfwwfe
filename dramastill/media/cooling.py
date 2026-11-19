@@ -45,14 +45,16 @@ class Decision:
     summary: str
 
 
-_lock = threading.Lock()
+_lock = threading.RLock()
 _state = CoolingState()
 _cached: tuple[float, tuple, Decision] | None = None
 _probe: Reading | None = None
 _cpu_sample: tuple[int, int] | None = None
 _gpu_missing = False
-_windows_temp: float | None = None
-_windows_temp_tried = False
+_gpu_block_until = 0.0
+_windows_temp_value: float | None = None
+_windows_temp_at = 0.0
+_windows_temp_thread: threading.Thread | None = None
 
 
 def cpu_count() -> int:
@@ -60,12 +62,17 @@ def cpu_count() -> int:
 
 
 def reset_for_tests(probe: Reading | None = None) -> None:
-    global _state, _cached, _probe, _cpu_sample
+    global _state, _cached, _probe, _cpu_sample, _gpu_missing, _gpu_block_until
+    global _windows_temp_value, _windows_temp_at
     with _lock:
         _state = CoolingState()
         _cached = None
         _probe = probe
         _cpu_sample = None
+        _gpu_missing = False
+        _gpu_block_until = 0.0
+        _windows_temp_value = None
+        _windows_temp_at = 0.0
 
 
 def mode_of(settings: VideoSettings) -> str:
@@ -179,12 +186,17 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
 
 def current(settings: VideoSettings) -> Decision:
     global _cached, _state
+    now = time.monotonic()
+    key = _settings_key(settings)
     with _lock:
-        now = time.monotonic()
-        key = _settings_key(settings)
         if _cached is not None and _cached[1] == key and now - _cached[0] < 2.0:
             return _cached[2]
-        reading = _probe if _probe is not None else read_machine()
+        probe = _probe
+    reading = probe if probe is not None else read_machine()
+    with _lock:
+        now = time.monotonic()
+        if _cached is not None and _cached[1] == key and now - _cached[0] < 2.0:
+            return _cached[2]
         decision, _state = evaluate(settings, reading, _state, now)
         _cached = (now, key, decision)
         return decision
@@ -320,10 +332,27 @@ def _read_temp_file(path: Path) -> list[float]:
 
 
 def _windows_temperature() -> float | None:
-    global _windows_temp_tried, _windows_temp
-    if _windows_temp_tried:
-        return _windows_temp
-    _windows_temp_tried = True
+    """Return the latest Windows reading without blocking the render on PowerShell."""
+
+    global _windows_temp_thread
+    if sys.platform != "win32":
+        return None
+    with _lock:
+        stale = _windows_temp_at == 0.0 or time.monotonic() - _windows_temp_at >= 30
+        running = _windows_temp_thread is not None and _windows_temp_thread.is_alive()
+        if stale and not running:
+            _windows_temp_thread = threading.Thread(
+                target=_refresh_windows_temperature,
+                name="dramastill-temp",
+                daemon=True,
+            )
+            _windows_temp_thread.start()
+        return _windows_temp_value
+
+
+def _refresh_windows_temperature() -> None:
+    global _windows_temp_value, _windows_temp_at
+    value: float | None = None
     try:
         completed = subprocess.run(
             [
@@ -340,16 +369,19 @@ def _windows_temperature() -> float | None:
         )
         raw = float((completed.stdout or "").strip())
         celsius = raw / 10.0 - 273.15
+        if 5.0 < celsius < 120.0:
+            value = celsius
     except (OSError, ValueError, subprocess.TimeoutExpired):
-        _windows_temp = None
-        return None
-    _windows_temp = celsius if 5.0 < celsius < 120.0 else None
-    return _windows_temp
+        value = None
+    with _lock:
+        _windows_temp_value = value
+        _windows_temp_at = time.monotonic()
 
 
 def _gpu() -> tuple[float | None, float | None]:
-    global _gpu_missing
-    if _gpu_missing:
+    global _gpu_missing, _gpu_block_until
+    now = time.monotonic()
+    if _gpu_missing and now < _gpu_block_until:
         return None, None
     try:
         completed = subprocess.run(
@@ -365,10 +397,13 @@ def _gpu() -> tuple[float | None, float | None]:
         )
     except (OSError, subprocess.TimeoutExpired):
         _gpu_missing = True
+        _gpu_block_until = time.monotonic() + 60
         return None, None
     if completed.returncode != 0:
         _gpu_missing = True
+        _gpu_block_until = time.monotonic() + 60
         return None, None
+    _gpu_missing = False
     line = (completed.stdout or "").strip().splitlines()
     if not line:
         return None, None
@@ -390,8 +425,9 @@ def _cpu_percent() -> float | None:
     sample = _cpu_times()
     if sample is None:
         return None
-    previous = _cpu_sample
-    _cpu_sample = sample
+    with _lock:
+        previous = _cpu_sample
+        _cpu_sample = sample
     if previous is None:
         return None
     idle = sample[0] - previous[0]
@@ -529,30 +565,126 @@ def _children(pid: int) -> list[int]:
 
 
 def _windows_rss_mb() -> float | None:
-    class Counters(ctypes_structure()):
+    total = _windows_tree_rss_bytes()
+    if total is None:
+        total = _windows_process_rss_bytes(None)
+    if total is None or total <= 0:
+        return None
+    return float(total) / (1024.0 * 1024.0)
+
+
+def _windows_process_rss_bytes(pid: int | None) -> int | None:
+    import ctypes
+
+    class Counters(ctypes.Structure):
         _fields_ = [
-            ("cb", ctypes_c_ulong()),
-            ("PageFaultCount", ctypes_c_ulong()),
-            ("PeakWorkingSetSize", ctypes_c_size_t()),
-            ("WorkingSetSize", ctypes_c_size_t()),
-            ("QuotaPeakPagedPoolUsage", ctypes_c_size_t()),
-            ("QuotaPagedPoolUsage", ctypes_c_size_t()),
-            ("QuotaPeakNonPagedPoolUsage", ctypes_c_size_t()),
-            ("QuotaNonPagedPoolUsage", ctypes_c_size_t()),
-            ("PagefileUsage", ctypes_c_size_t()),
-            ("PeakPagefileUsage", ctypes_c_size_t()),
+            ("cb", ctypes.c_ulong),
+            ("PageFaultCount", ctypes.c_ulong),
+            ("PeakWorkingSetSize", ctypes.c_size_t),
+            ("WorkingSetSize", ctypes.c_size_t),
+            ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+            ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+            ("PagefileUsage", ctypes.c_size_t),
+            ("PeakPagefileUsage", ctypes.c_size_t),
         ]
 
     counters = Counters()
-    counters.cb = ctypes_sizeof(counters)
+    counters.cb = ctypes.sizeof(counters)
     try:
-        handle = ctypes_windll().kernel32.GetCurrentProcess()
-        ok = ctypes_windll().psapi.GetProcessMemoryInfo(handle, ctypes_byref(counters), counters.cb)
-    except (AttributeError, OSError):
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        psapi = ctypes.WinDLL("psapi", use_last_error=True)
+        kernel.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.restype = ctypes.c_void_p
+        kernel.OpenProcess.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+        kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+        psapi.GetProcessMemoryInfo.argtypes = [ctypes.c_void_p, ctypes.POINTER(Counters), ctypes.c_ulong]
+    except (OSError, AttributeError):
         return None
+    handle = None
+    opened = False
+    try:
+        if pid is None:
+            handle = kernel.GetCurrentProcess()
+        else:
+            handle = kernel.OpenProcess(0x0410, False, int(pid))
+            opened = True
+        if not handle:
+            return None
+        ok = psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb)
+    except (OSError, AttributeError):
+        return None
+    finally:
+        if opened and handle:
+            kernel.CloseHandle(handle)
     if not ok:
         return None
-    return float(counters.WorkingSetSize) / (1024.0 * 1024.0)
+    return int(counters.WorkingSetSize)
+
+
+def _windows_tree_rss_bytes() -> int | None:
+    import ctypes
+
+    class Entry(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", ctypes.c_ulong),
+            ("cntUsage", ctypes.c_ulong),
+            ("th32ProcessID", ctypes.c_ulong),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", ctypes.c_ulong),
+            ("cntThreads", ctypes.c_ulong),
+            ("th32ParentProcessID", ctypes.c_ulong),
+            ("pcPriClassBase", ctypes.c_long),
+            ("dwFlags", ctypes.c_ulong),
+            ("szExeFile", ctypes.c_char * 260),
+        ]
+
+    try:
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    except OSError:
+        return None
+    kernel.CreateToolhelp32Snapshot.restype = ctypes.c_void_p
+    kernel.CreateToolhelp32Snapshot.argtypes = [ctypes.c_ulong, ctypes.c_ulong]
+    kernel.Process32First.argtypes = [ctypes.c_void_p, ctypes.POINTER(Entry)]
+    kernel.Process32Next.argtypes = [ctypes.c_void_p, ctypes.POINTER(Entry)]
+    kernel.CloseHandle.argtypes = [ctypes.c_void_p]
+    snapshot = kernel.CreateToolhelp32Snapshot(0x00000002, 0)
+    invalid = ctypes.c_void_p(-1).value
+    if not snapshot or snapshot == invalid:
+        return None
+    parents: dict[int, int] = {}
+    entry = Entry()
+    entry.dwSize = ctypes.sizeof(entry)
+    try:
+        if not kernel.Process32First(snapshot, ctypes.byref(entry)):
+            return None
+        while True:
+            parents[int(entry.th32ProcessID)] = int(entry.th32ParentProcessID)
+            entry.dwSize = ctypes.sizeof(entry)
+            if not kernel.Process32Next(snapshot, ctypes.byref(entry)):
+                break
+    except OSError:
+        return None
+    finally:
+        kernel.CloseHandle(snapshot)
+    root = os.getpid()
+    wanted = {root}
+    changed = True
+    while changed:
+        changed = False
+        for pid, parent in parents.items():
+            if parent in wanted and pid not in wanted:
+                wanted.add(pid)
+                changed = True
+    total = 0
+    found = False
+    for pid in wanted:
+        size = _windows_process_rss_bytes(pid if pid != root else None)
+        if size is not None:
+            total += size
+            found = True
+    return total if found else None
 
 
 def _user_active() -> bool:
