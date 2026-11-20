@@ -347,6 +347,32 @@ def test_grok_key_skips_the_slow_free_route(tmp_path):
         raise AssertionError("Grok без ключа не должен молча уходить на медленный маршрут")
 
 
+def test_tokenlavka_uses_its_gateway(tmp_path):
+    secrets = SecretStore(tmp_path / "secrets")
+    settings = AppSettings()
+    settings.llm.provider = "tokenlavka"
+    settings.llm.base_url = "https://tokenlavka.com/v1"
+    settings.llm.model = "claude-fable-5-1"
+    try:
+        build_llm(settings, secrets)
+    except ProviderError as exc:
+        assert "Tokenlavka" in str(exc)
+    else:
+        raise AssertionError("Tokenlavka без ключа не должна уходить на бесплатный маршрут")
+    secrets.set("llm", "xai-test-key")
+    provider = build_llm(settings, secrets)
+    assert isinstance(provider, OpenAICompatLLM)
+    assert provider.base_url == "https://tokenlavka.com/v1"
+    assert provider.model == "claude-fable-5-1"
+    assert provider.api_key == "xai-test-key"
+    assert provider.retries_immediately() is True
+    route = describe_route(settings, secrets)
+    assert "Tokenlavka" in route
+    assert "claude-fable-5-1" in route
+    settings.llm.model = "deepseek-v4.1-flash"
+    assert build_llm(settings, secrets).model == "deepseek-v4.1-flash"
+
+
 def test_factory_uses_edge_without_key(tmp_path):
     settings = AppSettings()
     settings.voice.provider = "edge"
