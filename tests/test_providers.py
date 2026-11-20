@@ -327,6 +327,26 @@ def test_gemini_without_key_uses_pollinations(tmp_path):
     assert paid_route.api_key == "AIza-free-gemini-key"
 
 
+def test_grok_key_skips_the_slow_free_route(tmp_path):
+    secrets = SecretStore(tmp_path / "secrets")
+    secrets.set("llm", "xai-test-key")
+    settings = AppSettings()
+    provider = build_llm(settings, secrets)
+    assert provider.base_url == "https://api.x.ai/v1"
+    assert provider.model == "grok-4.7"
+    assert provider.retries_immediately() is True
+    assert "Grok" in describe_route(settings, secrets)
+    settings.llm.provider = "grok"
+    settings.llm.model = "grok-4.7"
+    secrets.set("llm", "")
+    try:
+        build_llm(settings, secrets)
+    except ProviderError as exc:
+        assert "console.x.ai" in str(exc)
+    else:
+        raise AssertionError("Grok без ключа не должен молча уходить на медленный маршрут")
+
+
 def test_factory_uses_edge_without_key(tmp_path):
     settings = AppSettings()
     settings.voice.provider = "edge"

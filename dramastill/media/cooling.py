@@ -354,10 +354,14 @@ def _refresh_windows_temperature() -> None:
     global _windows_temp_value, _windows_temp_at
     value: float | None = None
     try:
+        from dramastill.media.ffmpeg_util import subprocess_kwargs
+
         completed = subprocess.run(
             [
                 "powershell",
                 "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
                 "-Command",
                 "(Get-CimInstance -Namespace root/wmi -ClassName MSAcpi_ThermalZoneTemperature | "
                 "Select-Object -First 1 -ExpandProperty CurrentTemperature)",
@@ -366,6 +370,7 @@ def _refresh_windows_temperature() -> None:
             text=True,
             timeout=5,
             check=False,
+            **subprocess_kwargs(),
         )
         raw = float((completed.stdout or "").strip())
         celsius = raw / 10.0 - 273.15
@@ -375,7 +380,8 @@ def _refresh_windows_temperature() -> None:
         value = None
     with _lock:
         _windows_temp_value = value
-        _windows_temp_at = time.monotonic()
+        # A missing sensor must not open PowerShell again every half minute.
+        _windows_temp_at = time.monotonic() + (0 if value is not None else 570)
 
 
 def _gpu() -> tuple[float | None, float | None]:
@@ -384,6 +390,8 @@ def _gpu() -> tuple[float | None, float | None]:
     if _gpu_missing and now < _gpu_block_until:
         return None, None
     try:
+        from dramastill.media.ffmpeg_util import subprocess_kwargs
+
         completed = subprocess.run(
             [
                 "nvidia-smi",
@@ -394,6 +402,7 @@ def _gpu() -> tuple[float | None, float | None]:
             text=True,
             timeout=2,
             check=False,
+            **subprocess_kwargs(),
         )
     except (OSError, subprocess.TimeoutExpired):
         _gpu_missing = True

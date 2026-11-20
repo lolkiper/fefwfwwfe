@@ -32,9 +32,15 @@ _ACTIVE_LOCK = threading.Lock()
 
 
 def subprocess_kwargs() -> dict:
-    if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-    return {}
+    if sys.platform != "win32":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": info,
+    }
 
 
 def _tool_filename(name: str) -> str:

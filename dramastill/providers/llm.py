@@ -42,6 +42,9 @@ class OpenAICompatLLM:
         self.model_chain: tuple[str, ...] = ()
         self._client: httpx.Client | None = None
 
+    def retries_immediately(self) -> bool:
+        return "pollinations.ai" not in self.base_url.lower()
+
     def _http(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
             self._client = httpx.Client(timeout=httpx.Timeout(300, connect=30), transport=self._transport)
@@ -197,6 +200,8 @@ class OpenAICompatLLM:
         return (
             "pollinations.ai" in url
             or "generativelanguage.googleapis.com" in url
+            or "api.x.ai" in url
+            or model.startswith("grok")
             or "gpt-oss" in model
             or model == "openai-fast"
         )

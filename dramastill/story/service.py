@@ -209,6 +209,12 @@ def _normalize_concept(data: dict) -> dict:
             continue
         appearance = str(person.get("appearance") or "").strip()
         name = str(person.get("name") or "").strip()
+        role = str(person.get("role") or "").strip()
+        wardrobe = str(person.get("wardrobe") or "").strip()
+        appearance = " ".join(part for part in (appearance, wardrobe, role) if part)
+        appearance = " ".join(appearance.split())
+        if name and len(appearance) < 40:
+            appearance = f"{appearance} Adult with a realistic face, natural skin, and ordinary clothes.".strip()
         if not name or len(appearance) < 40:
             continue
         characters.append(
@@ -225,8 +231,8 @@ def _normalize_concept(data: dict) -> dict:
     for index, chapter in enumerate(data.get("chapters") or [], start=1):
         if not isinstance(chapter, dict):
             continue
-        summary = str(chapter.get("summary") or "").strip()
-        if len(summary) < 20:
+        summary = str(chapter.get("summary") or chapter.get("title") or "").strip()
+        if len(summary) < 8:
             continue
         chapters.append(
             {
@@ -236,7 +242,7 @@ def _normalize_concept(data: dict) -> dict:
                 "purpose": str(chapter.get("purpose") or "").strip(),
             }
         )
-    moment = str(data.get("dramatic_moment") or "").strip()
+    moment = _dramatic_moment(data, characters, chapters)
     title = str(data.get("title") or "").strip()
     if len(characters) < 1:
         raise ValueError("В концепции нет устойчивого описания персонажа")
@@ -258,6 +264,21 @@ def _normalize_concept(data: dict) -> dict:
         "thumbnail_text": str(data.get("thumbnail_text") or title).strip(),
         "title_variants": variants[:3],
     }
+
+
+def _dramatic_moment(data: dict, characters: list[dict], chapters: list[dict]) -> str:
+    moment = str(data.get("dramatic_moment") or data.get("moment") or data.get("scene") or "").strip()
+    if len(moment) >= 40:
+        return " ".join(moment.split())
+    names = ", ".join(str(person.get("name") or "").strip() for person in characters[:3] if person.get("name"))
+    pieces = [
+        moment,
+        f"One cinematic 16:9 photograph of {names}." if names else "",
+        str(data.get("logline") or "").strip(),
+        chapters[0]["summary"] if chapters else "",
+    ]
+    built = " ".join(part for part in pieces if part)
+    return " ".join(built.split())
 
 
 def _concept_ready(story: dict) -> bool:
@@ -306,6 +327,11 @@ def _complete_json(llm: LLMProvider, *, system: str, user: str, temperature: flo
     try:
         return extract_json(result.text)
     except (ValueError, json.JSONDecodeError):
+        if not getattr(llm, "retries_immediately", lambda: True)():
+            raise ProviderError(
+                "Модель не вернула пригодный JSON. Повтор сразу пропущен, чтобы не ждать 46 секунд. "
+                "Для истории без этой паузы выберите Grok и вставьте ключ с console.x.ai."
+            )
         log("warning", "Ответ модели был не JSON, повторяю запрос")
         repaired = llm.complete(
             system=system,

@@ -56,7 +56,16 @@ def build_providers(settings: AppSettings, secrets: SecretStore) -> Providers:
     )
 
 
+def _uses_grok(settings: AppSettings, secrets: SecretStore) -> bool:
+    key = secrets.get("llm") or ""
+    if settings.llm.provider == "grok" or "api.x.ai" in (settings.llm.base_url or "").lower():
+        return True
+    return key.startswith("xai-")
+
+
 def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
+    if _uses_grok(settings, secrets):
+        return False
     if settings.llm.provider == "pollinations" or "pollinations.ai" in (settings.llm.base_url or "").lower():
         return not secrets.get("llm") or settings.llm.provider == "pollinations"
     if settings.llm.provider == "gemini" and not secrets.get("llm"):
@@ -67,6 +76,9 @@ def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
 def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     if uses_pollinations(settings, secrets):
         story = "История: Pollinations GPT-OSS 20B, без ключа и без дневного лимита"
+    elif _uses_grok(settings, secrets):
+        model = settings.llm.model if "grok" in (settings.llm.model or "").lower() else "grok-4.7"
+        story = f"История: Grok {model}, без паузы 46 секунд"
     elif settings.llm.provider == "llm7":
         story = f"История: LLM7 {settings.llm.model}"
     elif settings.llm.provider == "gemini":
@@ -88,6 +100,11 @@ def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
 
 def build_llm(settings: AppSettings, secrets: SecretStore):
     key = secrets.get("llm")
+    if _uses_grok(settings, secrets):
+        if not key:
+            raise ProviderError("Для Grok нужен ключ с console.x.ai. Его вставляют в поле ключа языковой модели.")
+        model = settings.llm.model if "grok" in (settings.llm.model or "").lower() else "grok-4.7"
+        return OpenAICompatLLM(base_url="https://api.x.ai/v1", api_key=key, model=model)
     if uses_pollinations(settings, secrets):
         return OpenAICompatLLM(base_url=POLLINATIONS_BASE, api_key="", model=POLLINATIONS_MODEL)
     if settings.llm.provider == "llm7":

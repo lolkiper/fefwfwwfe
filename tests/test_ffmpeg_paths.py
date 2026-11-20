@@ -64,6 +64,22 @@ def test_pause_stops_ffmpeg_without_waiting_for_the_whole_clip():
     raise AssertionError("пауза не остановила ffmpeg")
 
 
+def test_windows_helpers_are_started_without_a_console(monkeypatch):
+    class Info:
+        def __init__(self):
+            self.dwFlags = 0
+            self.wShowWindow = 7
+
+    monkeypatch.setattr(ffmpeg_util.sys, "platform", "win32")
+    monkeypatch.setattr(ffmpeg_util.subprocess, "STARTUPINFO", Info, raising=False)
+    monkeypatch.setattr(ffmpeg_util.subprocess, "STARTF_USESHOWWINDOW", 1, raising=False)
+    monkeypatch.setattr(ffmpeg_util.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    kwargs = ffmpeg_util.subprocess_kwargs()
+    assert kwargs["creationflags"] == 0x08000000
+    assert kwargs["startupinfo"].dwFlags & 1
+    assert kwargs["startupinfo"].wShowWindow == 0
+
+
 def test_ffmpeg_error_keeps_the_invalid_argument_line():
     stderr = "out_time=00:00:01.00\nError opening input files: Invalid argument\n"
     assert ffmpeg_error_text(stderr) == "Error opening input files: Invalid argument"

@@ -594,12 +594,12 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "API и ключи",
-            "Бесплатный маршрут ключей не требует: текст пишет Pollinations GPT-OSS, картинку рисует FLUX.1 Schnell. "
-            "Ключ Gemini с aistudio.google.com/apikey включает более сильный текст. Ключи не пишутся в журнал.",
+            "Без ключа история идёт через бесплатный маршрут: между запросами пауза около 46 секунд. "
+            "Grok убирает эту паузу: ключ берётся на console.x.ai. Картинку по-прежнему рисует FLUX.1 Schnell.",
         )
         self.llm_key = QLineEdit(self.secrets.get("llm"))
         self.llm_key.setEchoMode(QLineEdit.Password)
-        self.llm_key.setPlaceholderText("Необязательно: бесплатный ключ Gemini")
+        self.llm_key.setPlaceholderText("Ключ Grok (xAI) или Gemini. Пусто — бесплатный маршрут с паузой")
         self.image_key = QLineEdit(self.secrets.get("image"))
         self.image_key.setEchoMode(QLineEdit.Password)
         self.tts_key = QLineEdit(self.secrets.get("tts"))

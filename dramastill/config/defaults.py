@@ -62,6 +62,7 @@ FLUX_BASE = "https://black-forest-labs-flux-1-schnell.hf.space"
 FLUX_MODEL = "flux-1-schnell"
 
 LLM_PRESETS: list[tuple[str, str, str, str]] = [
+    ("grok", "Grok 4.7 (ключ xAI, без паузы)", "https://api.x.ai/v1", "grok-4.7"),
     ("gemini", "Gemini 3.8 Flash (бесплатно)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
     ("pollinations", "Pollinations GPT-OSS (без ключа)", POLLINATIONS_BASE, POLLINATIONS_MODEL),
     ("llm7", "LLM7 DeepSeek (нужен бесплатный токен)", LLM7_BASE, LLM7_MODEL),

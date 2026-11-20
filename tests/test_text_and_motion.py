@@ -14,6 +14,53 @@ def test_extract_json_from_fence():
     assert data["n"] == 2
 
 
+def test_extract_json_repairs_a_line_break_inside_the_text():
+    data = extract_json('Пояснение\n{"narration": "первая\nвторая",}')
+    assert data["narration"] == "первая\nвторая"
+
+
+def test_short_concept_still_gets_one_picture_moment():
+    from dramastill.story.service import _normalize_concept
+
+    story = _normalize_concept(
+        {
+            "title": "Чужое имя",
+            "logline": "Марина узнаёт, что завещание подписано чужой рукой.",
+            "characters": [{"name": "Марина", "role": "невестка", "age": 34, "appearance": "тёмные волосы"}],
+            "chapters": [{"title": "Ключ", "summary": "Она находит ключ от сейфа."}],
+        }
+    )
+    assert len(story["dramatic_moment"]) >= 40
+    assert "Марина" in story["dramatic_moment"]
+    assert story["characters"][0]["name"] == "Марина"
+
+
+def test_paced_model_does_not_spend_another_request_on_broken_json():
+    from dramastill.providers.base import LLMResult
+    from dramastill.providers.errors import ProviderError
+    from dramastill.story.service import _complete_json
+
+    class Once:
+        def __init__(self):
+            self.calls = 0
+
+        def retries_immediately(self) -> bool:
+            return False
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            return LLMResult("это не объект")
+
+    llm = Once()
+    try:
+        _complete_json(llm, system="s", user="u", temperature=0.2, max_tokens=100, log=lambda *_args: None)
+    except ProviderError as exc:
+        assert "46" in str(exc)
+    else:
+        raise AssertionError("сломанный ответ должен остановить запрос")
+    assert llm.calls == 1
+
+
 def test_sentences_pack_without_losing_words():
     text = "Первая фраза длинная. Вторая короче! Третья с вопросом?"
     sentences = split_sentences(text)
