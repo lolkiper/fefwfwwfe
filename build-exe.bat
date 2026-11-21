@@ -42,7 +42,7 @@ if errorlevel 1 (
 echo.
 echo ==============================================
 echo  DONE. Look in the "dist" folder:
-echo    - "Shorts Inserter Setup 2.4.0.exe"  (installer)
+echo    - "Shorts_Inserter_Setup_2.4.0.exe"  (installer)
 echo    - "Shorts Inserter 2.4.0.exe"        (portable)
 echo ==============================================
 dir /b dist\*.exe 2>nul

@@ -18,7 +18,7 @@ FFmpeg и FFprobe поставляются вместе с приложение�
 
 Готовые сборки лежат на [странице релизов](https://github.com/lolkiper/html/releases/latest):
 
-- `Shorts Inserter Setup <версия>.exe` — установщик;
+- `Shorts_Inserter_Setup_<версия>.exe` — установщик;
 - `Shorts Inserter <версия>.exe` — portable-версия, запускается без установки.
 
 Сборку делает GitHub Actions на Windows-раннере (`.github/workflows/build-windows.yml`),

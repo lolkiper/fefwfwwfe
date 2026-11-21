@@ -61,10 +61,8 @@ jobs:
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: shorts-inserter-windows
-          path: |
-            dist/*.exe
-            dist/*.blockmap
+          name: Shorts_Inserter_Setup
+          path: dist/Shorts_Inserter_Setup_*.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -72,5 +70,5 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/*.exe
+          files: dist/Shorts_Inserter_Setup_*.exe
           generate_release_notes: true
