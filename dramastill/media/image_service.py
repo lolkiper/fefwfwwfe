@@ -9,6 +9,7 @@ from PIL import Image
 from dramastill.config.defaults import ImageSettings
 from dramastill.providers.base import ImageProvider
 from dramastill.providers.errors import ProviderError
+from dramastill.providers.image import take_image_note
 from dramastill.story.image_prompt import build_chapter_image_prompt, build_image_prompt
 
 
@@ -104,18 +105,20 @@ def ensure_chapter_images(
                     raise ProviderError(f"Глава {number}: сервис вернул повреждённое изображение")
                 partial.replace(dest)
                 prompt_path.write_text(prompt, encoding="utf-8")
+                note = take_image_note()
+                if note:
+                    log("info", f"Глава {number}: {note}")
                 log("info", f"Глава {number}: изображение сохранено, {dest.name}")
                 return
             except Exception as exc:
                 last = exc
+                take_image_note()
                 if partial.exists():
                     partial.unlink()
                 reason = str(exc).strip()
                 if reason.lower() in {"", "null", "none"}:
                     reason = "FLUX скрыл причину. Кадр отклонён фильтром или очередь не ответила"
                 log("warning", f"Глава {number}: изображение не собралось, попытка {attempt} из 3: {reason}")
-                if "фильтром содержания" in reason:
-                    break
         raise ProviderError(str(last or f"Глава {number}: изображение не собралось"))
 
     workers = min(3, len(jobs))

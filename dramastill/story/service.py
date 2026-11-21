@@ -18,7 +18,7 @@ from dramastill.story.prompts import (
     continue_prompt,
     metadata_prompt,
 )
-from dramastill.story.textutil import drop_repeated_sentences, extract_json, prepare_narration
+from dramastill.story.textutil import drop_repeated_sentences, extract_json, prepare_narration, salvage_narration
 from dramastill.util import count_words
 
 Log = Callable[[str, str], None]
@@ -406,13 +406,16 @@ def _write_chapter(llm, settings, story, chapter, previous, target_words, temper
             required=("narration",),
         )
         candidate = drop_repeated_sentences(prepare_narration(str(data.get("narration") or "")))
-        if count_words(candidate) > count_words(narration):
+        grew = count_words(candidate) > count_words(narration)
+        if grew:
             narration = candidate
             summary = str(data.get("summary") or summary).strip()
         words = count_words(narration)
         log("info", f"Глава {number}: {words} слов при плане около {target_words}")
         if words >= floor:
             return narration, summary
+        if attempt > 0 and not grew:
+            break
         log("info", f"Глава {number} короче плана, модель дополняет её")
         prompt = continue_prompt(chapter, narration, target_words, language_line)
     if count_words(narration) < 30:
@@ -446,7 +449,9 @@ def _complete_json(
         )
         parsed, error = _parse_model_json(result.text, allow_plain=allow_plain, required=required)
         if parsed is not None:
-            if attempt > 1:
+            if error == "salvaged":
+                log("info", "Кривой JSON починен локально, повторный запрос не нужен")
+            elif attempt > 1:
                 log("info", f"JSON принят с попытки {attempt}. Ошибка прошлого ответа: {error or last_error}")
             return parsed
         last_error = error or last_error
@@ -485,6 +490,10 @@ def _parse_model_json(
         error = str(exc)
     else:
         error = ""
+    if data is None:
+        salvaged = salvage_narration(text)
+        if salvaged is not None and (not required or str(salvaged.get("narration") or "").strip()):
+            return salvaged, "salvaged"
     if data is None and allow_plain:
         prose = prepare_narration(text)
         if count_words(prose) >= 30 and "{" not in prose:

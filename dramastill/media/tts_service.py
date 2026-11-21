@@ -302,7 +302,7 @@ class ChapterAudioPrefetch:
 
 def speech_workers(settings: VoiceSettings) -> int:
     chosen = int(settings.parallelism or 4)
-    return max(1, min(4, chosen))
+    return max(1, min(6, chosen))
 
 
 def chapter_time_spans(plan: list[dict], speech_dir: Path, ffprobe: str) -> list[tuple[float, float, int]]:

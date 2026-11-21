@@ -327,6 +327,27 @@ def test_flux_null_error_is_a_filter_block_and_the_safe_prompt_is_saved(tmp_path
     assert dest.read_bytes() == payload
 
 
+def test_flux_uses_pollinations_after_the_space_hides_every_answer(tmp_path, monkeypatch):
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
+    payload = _png()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "pollinations.ai" in str(request.url):
+            return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"event_id": "evt"})
+        return httpx.Response(200, text="event: error\ndata: null\n\n")
+
+    dest = tmp_path / "still.png"
+    FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler)).generate(
+        prompt="A dark family argument in a kitchen",
+        dest=dest,
+        size="1280x720",
+        seed=-1,
+    )
+    assert dest.read_bytes() == payload
+
+
 def test_saved_pollinations_settings_move_off_that_service():
     from dramastill.config.defaults import app_settings_from_dict
 

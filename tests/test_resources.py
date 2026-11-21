@@ -14,7 +14,7 @@ def test_balanced_mode_keeps_two_projects_and_uses_nvenc_when_the_card_is_free()
     settings.max_parallel_projects = 8
     settings.encoder = "auto"
     assert project_slots(settings) == 2
-    assert chunk_workers(settings) == (2 if cpu_count() >= 4 else 1)
+    assert chunk_workers(settings) == (3 if cpu_count() >= 8 else 2 if cpu_count() >= 4 else 1)
     assert allow_nvenc(settings) is True
 
 
@@ -48,7 +48,7 @@ def test_cool_sensor_allows_more_work_and_nvenc():
     settings.max_parallel_projects = 8
     settings.encoder = "auto"
     assert project_slots(settings) == 3
-    assert chunk_workers(settings) == (2 if cpu_count() >= 4 else 1)
+    assert chunk_workers(settings) == (3 if cpu_count() >= 8 else 2 if cpu_count() >= 4 else 1)
     assert allow_nvenc(settings) is True
     settings.encoder = "libx264"
     reset_for_tests(Reading(cpu_temp_c=46, sensors_ok=True, cpu_percent=22))

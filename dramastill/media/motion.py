@@ -84,7 +84,7 @@ def motion_rate(fps: int) -> int:
 
     fps = max(8, int(fps))
     if fps >= 24:
-        return 12
+        return 8
     return fps
 
 

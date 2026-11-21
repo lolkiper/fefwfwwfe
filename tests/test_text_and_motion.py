@@ -14,6 +14,13 @@ def test_extract_json_from_fence():
     assert data["n"] == 2
 
 
+def test_extract_json_keeps_an_inner_quote():
+    raw = '{"narration": "Он сказал "нет" и вышел из дома, а потом долго молчал у окна.", "summary": "спор"}'
+    data = extract_json(raw)
+    assert "нет" in data["narration"]
+    assert data["summary"] == "спор"
+
+
 def test_extract_json_repairs_a_line_break_inside_the_text():
     data = extract_json('Пояснение\n{"narration": "первая\nвторая",}')
     assert data["narration"] == "первая\nвторая"
@@ -191,8 +198,8 @@ def test_sentences_pack_without_losing_words():
 def test_motion_rate_repeats_frames_only_at_video_rates():
     from dramastill.media.motion import motion_rate
 
-    assert motion_rate(30) == 12
-    assert motion_rate(24) == 12
+    assert motion_rate(30) == 8
+    assert motion_rate(24) == 8
     assert motion_rate(20) == 20
     assert motion_rate(12) == 12
 

@@ -40,26 +40,62 @@ def _escape_string_breaks(blob: str) -> str:
     out: list[str] = []
     in_string = False
     escape = False
-    for char in blob:
+    index = 0
+    while index < len(blob):
+        char = blob[index]
         if escape:
             out.append(char)
             escape = False
+            index += 1
             continue
         if char == "\\" and in_string:
             out.append(char)
             escape = True
+            index += 1
             continue
         if char == '"':
-            in_string = not in_string
-            out.append(char)
+            if in_string and not _closes_string(blob, index + 1):
+                out.append('\\"')
+            else:
+                in_string = not in_string
+                out.append(char)
+            index += 1
             continue
         if in_string and char == "\n":
             out.append("\\n")
+            index += 1
             continue
         if in_string and char == "\r":
+            index += 1
             continue
         out.append(char)
+        index += 1
     return "".join(out)
+
+
+def _closes_string(blob: str, index: int) -> bool:
+    while index < len(blob) and blob[index] in " \t\r\n":
+        index += 1
+    return index >= len(blob) or blob[index] in ",}]:"
+
+
+def salvage_narration(text: str) -> dict[str, str] | None:
+    """Вытаскивает текст главы, если модель сломала запятую или кавычку внутри JSON."""
+    match = re.search(r'"narration"\s*:\s*"', text or "")
+    if match is None:
+        return None
+    body = text[match.end() :]
+    end = re.search(r'"\s*,\s*"(?:summary|changed)"', body)
+    chunk = body[: end.start()] if end else body
+    chunk = chunk.replace("\\n", " ").replace('\\"', '"').strip().strip('"')
+    narration = prepare_narration(chunk)
+    if len(narration.split()) < 30:
+        return None
+    summary = ""
+    summary_match = re.search(r'"summary"\s*:\s*"(.*?)"\s*[,}]', text, flags=re.S)
+    if summary_match is not None:
+        summary = prepare_narration(summary_match.group(1))
+    return {"narration": narration, "summary": summary}
 
 
 def split_sentences(text: str) -> list[str]:

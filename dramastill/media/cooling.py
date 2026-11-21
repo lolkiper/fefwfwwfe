@@ -128,7 +128,7 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
     if quiet or (mode == "cool" and not sensors) or busy:
         workers = 1
     elif nvenc:
-        workers = 2 if budget >= 4 else 1
+        workers = 3 if budget >= 8 else 2 if budget >= 4 else 1
     else:
         workers = 2 if budget >= 8 else 1
     threads = max(1, budget // workers)
