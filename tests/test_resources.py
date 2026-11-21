@@ -48,11 +48,20 @@ def test_cool_sensor_allows_more_work_and_nvenc():
     settings.max_parallel_projects = 8
     settings.encoder = "auto"
     assert project_slots(settings) == 3
-    assert chunk_workers(settings) == (2 if cpu_count() >= 4 else 1)
+    assert chunk_workers(settings) == min(10, cpu_count())
     assert allow_nvenc(settings) is True
     settings.encoder = "libx264"
     reset_for_tests(Reading(cpu_temp_c=46, sensors_ok=True, cpu_percent=22))
     assert allow_nvenc(settings) is False
+
+
+def test_balanced_cool_machine_encodes_ten_fragments():
+    reset_for_tests(Reading(cpu_temp_c=38, gpu_temp_c=38, sensors_ok=True, cpu_percent=20, gpu_percent=10))
+    settings = VideoSettings()
+    settings.cooling_mode = "balanced"
+    settings.render_mode = "fast"
+    settings.encoder = "libx264"
+    assert chunk_workers(settings) == min(10, cpu_count())
 
 
 def test_memory_check_does_not_crash():
@@ -72,6 +81,7 @@ def test_heat_steps_up_slowly_and_recovers_slowly():
     decision, state = evaluate(settings, hot, state, now=121)
     assert decision.level == 1
     assert decision.projects == 1
+    assert decision.chunk_workers == 1
     decision, state = evaluate(settings, hot, state, now=130)
     assert decision.level == 1
     decision, state = evaluate(settings, hot, state, now=150)

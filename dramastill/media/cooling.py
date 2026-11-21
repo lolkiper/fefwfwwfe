@@ -119,8 +119,8 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
     sensors = bool(reading.sensors_ok and temp is not None)
     if quiet or (mode == "cool" and not sensors):
         workers = 1
-    elif mode == "cool" and sensors and state.level == 0 and budget >= 4:
-        workers = min(2, max(1, budget - 1))
+    elif sensors and state.level == 0 and not hot:
+        workers = min(10, max(1, budget))
     else:
         workers = 1
     if state.level >= 1:

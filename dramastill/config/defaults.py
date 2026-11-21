@@ -195,7 +195,7 @@ class VoiceSettings:
     sentence_pause_ms: int = 0
     chapter_pause_ms: int = 700
     chunk_chars: int = 2800
-    parallelism: int = 2
+    parallelism: int = 10
     eleven_model: str = "eleven_multilingual_v2"
 
 

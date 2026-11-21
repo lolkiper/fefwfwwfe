@@ -358,7 +358,7 @@ class MainWindow(QMainWindow):
         self.chapter_pause = self._int(0, 4000, self.settings.voice.chapter_pause_ms)
         self.chapter_pause.setSuffix(" мс")
         self.chunk_chars = self._int(400, 4500, self.settings.voice.chunk_chars)
-        self.tts_parallel = self._int(1, 4, self.settings.voice.parallelism)
+        self.tts_parallel = self._int(1, 10, self.settings.voice.parallelism)
         form.addRow("Сервис", self.tts_provider)
         form.addRow("Адрес API", self.tts_url)
         form.addRow("Модель", self.tts_model)

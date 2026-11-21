@@ -184,54 +184,71 @@ class ChapterAudioPrefetch:
         self.token = token
         self.log = log
         self._lock = threading.Lock()
-        self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="drama-voice")
-        self._future: Future | None = None
+        self._pool = ThreadPoolExecutor(max_workers=speech_workers(settings), thread_name_prefix="drama-voice")
+        self._inflight: dict[int, Future] = {}
         self._announced = False
 
     def submit(self, story: dict) -> None:
-        snapshot = json.loads(json.dumps(story))
-        with self._lock:
-            previous = self._future
-            if previous is not None and not previous.done():
-                self._future = self._pool.submit(self._after, previous, snapshot)
-            else:
-                self._future = self._pool.submit(self._run, snapshot)
-
-    def wait(self) -> None:
-        with self._lock:
-            future = self._future
-        try:
-            if future is not None:
-                future.result()
-        finally:
-            self._pool.shutdown(wait=True)
-
-    def _after(self, previous: Future, story: dict) -> None:
-        previous.result()
-        self._run(story)
-
-    def _run(self, story: dict) -> None:
         self.token.check()
         try:
             plan = build_plan(story, self.settings)
         except ProviderError:
             return
-        items = [item for item in plan if item["kind"] == "speech"]
         speech_dir = self.work_dir / "audio" / "speech"
         speech_dir.mkdir(parents=True, exist_ok=True)
-        if not self._announced:
-            self._announced = True
-            self.log("info", "Готовая глава озвучивается, пока пишется следующая")
-        _synthesize_all(
-            provider=self.provider,
-            settings=self.settings,
-            items=items,
-            speech_dir=speech_dir,
-            ffprobe=self.ffprobe,
-            token=self.token,
-            log=self.log,
-            progress=lambda _fraction: None,
+        with self._lock:
+            if not self._announced:
+                self._announced = True
+                self.log("info", "Готовые главы озвучиваются, пока пишутся следующие")
+            for item in plan:
+                if item.get("kind") != "speech":
+                    continue
+                index = int(item["index"])
+                dest = speech_dir / f"{index:05d}.mp3"
+                if _audio_ok(self.ffprobe, dest):
+                    continue
+                current = self._inflight.get(index)
+                if current is not None and not current.done():
+                    continue
+                self._inflight[index] = self._pool.submit(self._speak, dict(item), dest)
+
+    def wait(self) -> None:
+        with self._lock:
+            futures = list(self._inflight.values())
+        error: Exception | None = None
+        for future in futures:
+            try:
+                future.result()
+            except Exception as exc:
+                error = exc
+        self._pool.shutdown(wait=True)
+        if error is not None:
+            raise error
+
+    def _speak(self, item: dict, dest: Path) -> None:
+        self.token.check()
+        partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
+        if partial.exists():
+            partial.unlink()
+        self.provider.synthesize(
+            text=item["text"],
+            dest=partial,
+            voice=self.settings.voice,
+            speed=float(self.settings.speed),
+            emotion=self.settings.emotion,
+            language="",
         )
+        if not _audio_ok(self.ffprobe, partial):
+            partial.unlink(missing_ok=True)
+            raise ProviderError(f"Пустой аудиофрагмент {item['index'] + 1}")
+        partial.replace(dest)
+
+
+def speech_workers(settings: VoiceSettings) -> int:
+    chosen = int(settings.parallelism or 10)
+    if chosen <= 2:
+        chosen = 10
+    return max(1, min(10, chosen))
 
 
 def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, log, progress) -> None:
@@ -245,7 +262,7 @@ def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, lo
     if not pending:
         progress(1.0)
         return
-    workers = max(1, min(4, int(settings.parallelism)))
+    workers = speech_workers(settings)
     log("info", f"Озвучка: {len(pending)} фрагментов, потоков: {workers}")
 
     def task(item: dict) -> int:

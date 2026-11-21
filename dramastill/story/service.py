@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
@@ -21,6 +23,7 @@ from dramastill.util import count_words
 
 Log = Callable[[str, str], None]
 Progress = Callable[[float, str], None]
+FANOUT = 10
 
 
 def load_story(path: Path) -> dict:
@@ -55,51 +58,84 @@ def ensure_story(
         log("info", "Модель придумывает оригинальную историю и один драматический момент")
         story = _generate_concept(llm, settings, target_words, temperature, max_tokens, log)
         save_story(path, story)
-    progress(0.18, "story")
-
     outlines = story.get("chapters") or []
-    per_chapter = max(80, target_words // max(1, len(outlines)))
-    for index, chapter in enumerate(outlines):
-        token.check()
-        if (chapter.get("narration") or "").strip():
-            continue
-        log("info", f"Пишется глава {chapter.get('index', index + 1)} из {len(outlines)}")
-        previous = outlines[:index]
-        narration, summary = _write_chapter(
-            llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
-        )
-        chapter["narration"] = narration
-        if summary:
-            chapter["summary_actual"] = summary
-        save_story(path, story)
-        progress(0.18 + 0.62 * ((index + 1) / len(outlines)), "story")
-        if not settings.consistency_check:
-            _publish_ready(on_chapter_final, outlines, settings)
+    total = max(1, len(outlines))
+    per_chapter = max(80, target_words // total)
+    lock = threading.Lock()
+
+    def _note() -> None:
+        written = sum(1 for chapter in outlines if (chapter.get("narration") or "").strip())
+        checked = sum(1 for chapter in outlines if chapter.get("consistency_done"))
+        if settings.consistency_check:
+            fraction = 0.18 + 0.62 * (written / total) + 0.20 * (checked / total)
+        else:
+            fraction = 0.18 + 0.82 * (written / total)
+        progress(min(0.99, fraction), "story")
+
+    _note()
+    pending = [chapter for chapter in outlines if not (chapter.get("narration") or "").strip()]
+    if pending:
+        workers = min(FANOUT, len(pending))
+        log("info", f"Главы пишутся одновременно: {workers}")
+
+        def write(chapter: dict) -> None:
+            token.check()
+            index = outlines.index(chapter)
+            log("info", f"Пишется глава {chapter.get('index', index + 1)} из {len(outlines)}")
+            previous = [_chapter_context(item) for item in outlines[:index]]
+            narration, summary = _write_chapter(
+                llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
+            )
+            with lock:
+                chapter["narration"] = narration
+                if summary:
+                    chapter["summary_actual"] = summary
+                save_story(path, story)
+                _note()
+            if not settings.consistency_check:
+                _publish_ready(on_chapter_final, outlines, settings)
+
+        _parallel(token, workers, pending, write)
 
     if settings.consistency_check and not story.get("consistency_done"):
         language_line = language_instruction(settings.language, settings.custom_language)
-        for index, chapter in enumerate(outlines):
-            token.check()
-            if chapter.get("consistency_done"):
-                continue
-            log("info", f"Проверка последовательности, глава {chapter.get('index', index + 1)}")
-            checked = _complete_json(
-                llm,
-                system=SYSTEM,
-                user=consistency_prompt(story, chapter, language_line),
-                temperature=0.2,
-                max_tokens=max_tokens,
-                log=log,
-            )
-            if checked.get("changed") and (checked.get("narration") or "").strip():
-                chapter["narration"] = prepare_narration(str(checked["narration"]))
-                if checked.get("summary"):
-                    chapter["summary_actual"] = str(checked["summary"]).strip()
-                log("info", f"Глава {chapter.get('index', index + 1)} поправлена после проверки")
-            chapter["consistency_done"] = True
-            save_story(path, story)
-            _publish_ready(on_chapter_final, outlines, settings)
-            progress(0.82 + 0.18 * ((index + 1) / len(outlines)), "story")
+        pending_checks = [chapter for chapter in outlines if not chapter.get("consistency_done")]
+        if pending_checks:
+            workers = min(FANOUT, len(pending_checks))
+            log("info", f"Проверка последовательности одновременно: {workers}")
+
+            def check(chapter: dict) -> None:
+                token.check()
+                index = outlines.index(chapter)
+                number = chapter.get("index", index + 1)
+                log("info", f"Проверка последовательности, глава {number}")
+                try:
+                    checked = _complete_json(
+                        llm,
+                        system=SYSTEM,
+                        user=consistency_prompt(story, chapter, language_line),
+                        temperature=0.2,
+                        max_tokens=max_tokens,
+                        log=log,
+                        allow_plain=True,
+                    )
+                except ProviderError as exc:
+                    log("warning", f"Глава {number} оставлена как есть: {exc}")
+                    checked = {}
+                changed = bool(checked.get("changed") and (checked.get("narration") or "").strip())
+                with lock:
+                    if changed:
+                        chapter["narration"] = prepare_narration(str(checked["narration"]))
+                        if checked.get("summary"):
+                            chapter["summary_actual"] = str(checked["summary"]).strip()
+                    chapter["consistency_done"] = True
+                    save_story(path, story)
+                    _note()
+                if changed:
+                    log("info", f"Глава {number} поправлена после проверки")
+                _publish_ready(on_chapter_final, outlines, settings)
+
+            _parallel(token, workers, pending_checks, check)
         story["consistency_done"] = True
         save_story(path, story)
 
@@ -120,12 +156,33 @@ def _publish_ready(callback: Callable[[dict], None] | None, outlines: list, sett
     ready = []
     for chapter in outlines:
         if not (chapter.get("narration") or "").strip():
-            continue
+            break
         if settings.consistency_check and not chapter.get("consistency_done"):
-            continue
+            break
         ready.append(dict(chapter))
     if ready:
         callback({"chapters": ready})
+
+
+def _chapter_context(chapter: dict) -> dict:
+    return {
+        "index": chapter.get("index"),
+        "summary": chapter.get("summary_actual") or chapter.get("summary") or "",
+        "narration": chapter.get("narration") or "",
+    }
+
+
+def _parallel(token: CancelToken, workers: int, items: list, job: Callable) -> None:
+    if workers <= 1 or len(items) <= 1:
+        for item in items:
+            token.check()
+            job(item)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(job, item) for item in items]
+        for future in as_completed(futures):
+            token.check()
+            future.result()
 
 
 def ensure_metadata(
@@ -294,6 +351,7 @@ def _write_chapter(llm, settings, story, chapter, previous, target_words, temper
         temperature=temperature,
         max_tokens=max_tokens,
         log=log,
+        allow_plain=True,
     )
     narration = prepare_narration(str(data.get("narration") or ""))
     summary = str(data.get("summary") or "").strip()
@@ -306,6 +364,7 @@ def _write_chapter(llm, settings, story, chapter, previous, target_words, temper
             temperature=temperature,
             max_tokens=max_tokens,
             log=log,
+            allow_plain=True,
         )
         longer = prepare_narration(str(expanded.get("narration") or ""))
         if count_words(longer) > count_words(narration):
@@ -316,7 +375,16 @@ def _write_chapter(llm, settings, story, chapter, previous, target_words, temper
     return narration, summary
 
 
-def _complete_json(llm: LLMProvider, *, system: str, user: str, temperature: float, max_tokens: int, log: Log) -> dict:
+def _complete_json(
+    llm: LLMProvider,
+    *,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+    log: Log,
+    allow_plain: bool = False,
+) -> dict:
     result = llm.complete(
         system=system,
         user=user,
@@ -324,23 +392,36 @@ def _complete_json(llm: LLMProvider, *, system: str, user: str, temperature: flo
         max_tokens=max_tokens,
         json_mode=True,
     )
-    try:
-        return extract_json(result.text)
-    except (ValueError, json.JSONDecodeError):
-        if not getattr(llm, "retries_immediately", lambda: True)():
-            raise ProviderError(
-                "Модель не вернула пригодный JSON. Повтор сразу пропущен, чтобы не ждать 46 секунд. "
-                "Для истории без этой паузы выберите Grok и вставьте ключ с console.x.ai."
-            )
-        log("warning", "Ответ модели был не JSON, повторяю запрос")
-        repaired = llm.complete(
-            system=system,
-            user="TASK: json_repair\nReturn one valid JSON object only, no markdown.\n" + result.text[:12000],
-            temperature=0.1,
-            max_tokens=max_tokens,
-            json_mode=True,
+    parsed = _parse_model_json(result.text, allow_plain=allow_plain)
+    if parsed is not None:
+        return parsed
+    if not getattr(llm, "retries_immediately", lambda: True)():
+        raise ProviderError(
+            "Модель не вернула пригодный JSON. Повтор сразу пропущен, чтобы не ждать 46 секунд. "
+            "Для истории без этой паузы выберите Grok и вставьте ключ с console.x.ai."
         )
-        try:
-            return extract_json(repaired.text)
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise ProviderError("Модель не вернула пригодный JSON") from exc
+    log("warning", "Ответ модели был не JSON, повторяю запрос")
+    repaired = llm.complete(
+        system=system,
+        user="TASK: json_repair\nReturn one valid JSON object only, no markdown.\n" + result.text[:12000],
+        temperature=0.1,
+        max_tokens=max_tokens,
+        json_mode=True,
+    )
+    parsed = _parse_model_json(repaired.text, allow_plain=allow_plain)
+    if parsed is not None:
+        return parsed
+    raise ProviderError("Модель не вернула пригодный JSON")
+
+
+def _parse_model_json(text: str, *, allow_plain: bool) -> dict | None:
+    try:
+        return extract_json(text)
+    except (ValueError, json.JSONDecodeError):
+        pass
+    if not allow_plain:
+        return None
+    prose = prepare_narration(text)
+    if count_words(prose) < 30 or "{" in prose:
+        return None
+    return {"narration": prose, "summary": "", "changed": True}

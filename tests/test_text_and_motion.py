@@ -61,6 +61,90 @@ def test_paced_model_does_not_spend_another_request_on_broken_json():
     assert llm.calls == 1
 
 
+def test_plain_chapter_text_is_kept_without_a_second_request():
+    from dramastill.providers.base import LLMResult
+    from dramastill.story.service import _complete_json
+
+    class Once:
+        def __init__(self):
+            self.calls = 0
+
+        def retries_immediately(self) -> bool:
+            return True
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            return LLMResult(" ".join(["Марина открыла сейф и увидела чужое имя."] * 8))
+
+    llm = Once()
+    data = _complete_json(
+        llm, system="s", user="u", temperature=0.2, max_tokens=100, log=lambda *_args: None, allow_plain=True
+    )
+    assert llm.calls == 1
+    assert "Марина" in data["narration"]
+
+
+def test_chapters_are_written_ten_wide_and_a_bad_check_keeps_the_text(tmp_path):
+    from dramastill.cancel import CancelToken
+    from dramastill.config.defaults import StorySettings
+    from dramastill.providers.base import LLMResult
+    from dramastill.story.service import ensure_story
+
+    narration = " ".join(["Марина открыла сейф и увидела чужое имя."] * 8)
+    current = {"open": 0, "most": 0}
+    gate = __import__("threading").Lock()
+
+    class LLM:
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            task = user.splitlines()[0]
+            if task == "TASK: concept":
+                raise AssertionError("concept already exists")
+            if task == "TASK: consistency":
+                if "CHAPTER_INDEX: 2" in user:
+                    return LLMResult("не json")
+                return LLMResult('{"changed": false, "narration": "%s", "summary": "ок"}' % narration)
+            with gate:
+                current["open"] += 1
+                current["most"] = max(current["most"], current["open"])
+            try:
+                __import__("time").sleep(0.1)
+                return LLMResult('{"narration": "%s", "summary": "глава готова"}' % narration)
+            finally:
+                with gate:
+                    current["open"] -= 1
+
+    story = {
+        "title": "Сейф",
+        "dramatic_moment": "Marina stands at an open safe in a dark kitchen and holds a will.",
+        "characters": [{"name": "Марина", "appearance": "woman of 34 with dark hair and a grey coat, tired eyes"}],
+        "chapters": [
+            {"index": index, "title": f"Глава {index}", "summary": "Марина делает следующий шаг в споре из-за завещания."}
+            for index in range(1, 5)
+        ],
+    }
+    path = tmp_path / "story.json"
+    path.write_text(__import__("json").dumps(story, ensure_ascii=False), encoding="utf-8")
+    settings = StorySettings()
+    settings.consistency_check = True
+    settings.duration_minutes = 4
+    settings.chapters = 4
+    result = ensure_story(
+        settings=settings,
+        llm=LLM(),
+        path=path,
+        narration_path=tmp_path / "narration.txt",
+        token=CancelToken(),
+        log=lambda *_args: None,
+        progress=lambda *_args: None,
+        temperature=0.4,
+        max_tokens=2000,
+    )
+    assert current["most"] >= 2
+    assert all((chapter.get("narration") or "").strip() for chapter in result["chapters"])
+    assert result["chapters"][1]["consistency_done"] is True
+    assert "Марина" in result["narration"]
+
+
 def test_sentences_pack_without_losing_words():
     text = "Первая фраза длинная. Вторая короче! Третья с вопросом?"
     sentences = split_sentences(text)

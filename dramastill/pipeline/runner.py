@@ -74,6 +74,7 @@ def run_project(
             "Скорость: "
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
             f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
+            "Главы, проверка и озвучка идут до 10 одновременно. "
             "Картинка двигается через scale и crop, без zoompan. "
             "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
