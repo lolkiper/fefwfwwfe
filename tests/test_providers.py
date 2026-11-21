@@ -296,6 +296,37 @@ def test_flux_retries_then_saves_one_image(tmp_path, monkeypatch):
     assert dest.read_bytes() == payload
 
 
+def test_flux_null_error_is_a_filter_block_and_the_safe_prompt_is_saved(tmp_path, monkeypatch):
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda *_args: None)
+    payload = _png()
+    prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            body = json.loads(request.content.decode())
+            prompts.append(body["data"][0])
+            return httpx.Response(200, json={"event_id": f"evt{len(prompts)}"})
+        if str(request.url).endswith("/evt1"):
+            return httpx.Response(200, text="event: error\ndata: null\n\n")
+        if str(request.url).endswith("/evt2"):
+            data = json.dumps([{"url": "https://flux.test/still.png"}])
+            return httpx.Response(200, text=f"event: complete\ndata: {data}\n")
+        return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
+
+    dest = tmp_path / "still.png"
+    prefix = "photorealistic cinematic film still of one room and two clothed people. "
+    FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler)).generate(
+        prompt=prefix * 12 + "A man is shot. Blood and a gun fill the kitchen.",
+        dest=dest,
+        size="1280x720",
+        seed=3,
+    )
+    assert len(prompts) == 2
+    assert "uninjured" in prompts[1]
+    assert "Blood" not in prompts[1]
+    assert dest.read_bytes() == payload
+
+
 def test_saved_pollinations_settings_move_off_that_service():
     from dramastill.config.defaults import app_settings_from_dict
 

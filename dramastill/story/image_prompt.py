@@ -30,12 +30,20 @@ def build_chapter_image_prompt(story: dict, chapter: dict, settings: ImageSettin
         lines.append(f"{name}, age {age}: {appearance}. Wardrobe: {wardrobe}.")
     summary = str(chapter.get("summary_actual") or chapter.get("summary") or "").strip()
     narration = " ".join(str(chapter.get("narration") or "").split())
-    if len(narration) > 700:
-        narration = narration[:700].rsplit(" ", 1)[0]
+    sentence = narration.split(".")[0].strip() if narration else ""
+    if len(sentence) > 180:
+        sentence = sentence[:180].rsplit(" ", 1)[0]
     moment = summary or (story.get("dramatic_moment") or "").strip()
-    lines.append(f"The moment in the frame: {moment}")
-    if narration:
-        lines.append(f"What just happened, shown in one frozen instant: {narration}")
+    if len(moment) > 240:
+        moment = moment[:240].rsplit(" ", 1)[0]
+    lines.append(
+        "Everyone in the frame is clothed and physically uninjured. "
+        "No blood, wounds, weapons, nudity, or written text."
+    )
+    if moment:
+        lines.append(f"The moment in the frame, shown through faces and the room: {moment}")
+    if sentence:
+        lines.append(f"The instant, without graphic detail: {sentence}")
     extra = (settings.style_extra or "").strip()
     if extra:
         lines.append(extra)

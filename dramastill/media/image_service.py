@@ -110,7 +110,12 @@ def ensure_chapter_images(
                 last = exc
                 if partial.exists():
                     partial.unlink()
-                log("warning", f"Глава {number}: изображение не собралось, попытка {attempt} из 3: {exc}")
+                reason = str(exc).strip()
+                if reason.lower() in {"", "null", "none"}:
+                    reason = "FLUX скрыл причину. Кадр отклонён фильтром или очередь не ответила"
+                log("warning", f"Глава {number}: изображение не собралось, попытка {attempt} из 3: {reason}")
+                if "фильтром содержания" in reason:
+                    break
         raise ProviderError(str(last or f"Глава {number}: изображение не собралось"))
 
     workers = min(3, len(jobs))
