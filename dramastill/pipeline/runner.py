@@ -118,6 +118,7 @@ def run_project(
         if prefetch_error is not None:
             raise prefetch_error
         assert story is not None
+        log("info", "История и озвучка готовы, дальше кадры и монтаж")
         title = str(story.get("title") or project.title)
         db.update(project_id, title=title)
         if callbacks is not None:

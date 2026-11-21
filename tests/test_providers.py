@@ -373,6 +373,35 @@ def test_tokenlavka_uses_its_gateway(tmp_path):
     assert build_llm(settings, secrets).model == "deepseek-v4.1-flash"
 
 
+def test_tokenlavka_balance_reads_the_cabinet_remainder():
+    from dramastill.providers.tokenlavka import balance_view, format_balance
+
+    label, tip = format_balance({"key": {"balance": 1234567, "reserved": 20}})
+    assert label == "Баланс: 1 234 567"
+    assert "20" in tip
+    secret = "sk-testsecretvalue123456"
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        body = json.loads(request.content.decode())
+        assert body["key"] == secret
+        return httpx.Response(200, json={"key": {"balance": 42, "reserved": 0}})
+
+    label, tip = balance_view(secret, transport=httpx.MockTransport(handler))
+    assert seen["path"] == "/api/portal"
+    assert label == "Баланс: 42"
+    assert secret not in label
+    assert secret not in tip
+
+    def missing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not_found"})
+
+    label, _tip = balance_view(secret, transport=httpx.MockTransport(missing))
+    assert label == "Баланс: ключ не найден"
+    assert secret not in label
+
+
 def test_factory_uses_edge_without_key(tmp_path):
     settings = AppSettings()
     settings.voice.provider = "edge"

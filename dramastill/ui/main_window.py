@@ -6,7 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, QTimer, QUrl
+from PySide6.QtCore import Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -70,6 +70,20 @@ EDGE_VOICES = {
 }
 
 
+class BalanceWorker(QThread):
+    ready = Signal(str, str)
+
+    def __init__(self, api_key: str):
+        super().__init__()
+        self._api_key = api_key
+
+    def run(self) -> None:
+        from dramastill.providers.tokenlavka import balance_view
+
+        label, tip = balance_view(self._api_key)
+        self.ready.emit(label, tip)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -95,13 +109,54 @@ class MainWindow(QMainWindow):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self.refresh_projects)
         self._timer.start(1000)
+        self.balance_label = QLabel("Баланс: —")
+        self.balance_label.setObjectName("balance")
+        self.balance_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.statusBar().addPermanentWidget(self.balance_label)
+        self._balance_worker: BalanceWorker | None = None
+        self._balance_timer = QTimer(self)
+        self._balance_timer.timeout.connect(self._refresh_balance)
+        self._balance_timer.start(20000)
         self.refresh_projects()
         self.statusBar().showMessage("Готово. Одно изображение используется на всю длительность ролика.")
+        QTimer.singleShot(800, self._refresh_balance)
 
     def shutdown(self) -> None:
         self._timer.stop()
+        self._balance_timer.stop()
+        worker = self._balance_worker
+        if worker is not None:
+            try:
+                worker.ready.disconnect(self._show_balance)
+            except (RuntimeError, TypeError):
+                pass
+            if worker.isRunning():
+                worker.wait(400)
         self.scheduler.request_stop()
         self.scheduler.wait(2000)
+
+    def _refresh_balance(self) -> None:
+        provider = str(self.settings.llm.provider or "")
+        url = str(self.settings.llm.base_url or "")
+        if provider != "tokenlavka" and "tokenlavka.com" not in url:
+            self._show_balance("Баланс: —", "Баланс показывается для сервиса Tokenlavka")
+            return
+        key = (self.secrets.get("llm") or "").strip()
+        if not key:
+            self._show_balance("Баланс: нет ключа", "Вставьте ключ Tokenlavka в настройках")
+            return
+        worker = self._balance_worker
+        if worker is not None and worker.isRunning():
+            return
+        self.balance_label.setText("Баланс: …")
+        worker = BalanceWorker(key)
+        worker.ready.connect(self._show_balance)
+        self._balance_worker = worker
+        worker.start()
+
+    def _show_balance(self, label: str, tip: str) -> None:
+        self.balance_label.setText(label)
+        self.balance_label.setToolTip(tip)
 
     def closeEvent(self, event) -> None:
         self.shutdown()
@@ -780,6 +835,7 @@ class MainWindow(QMainWindow):
         self.secrets.set_many({"llm": self.llm_key.text().strip(), "image": self.image_key.text().strip(), "tts": self.tts_key.text().strip()})
         self.settings = settings
         self.statusBar().showMessage("Настройки сохранены")
+        self._refresh_balance()
 
     def create_video(self) -> None:
         self.persist()

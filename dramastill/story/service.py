@@ -26,6 +26,32 @@ Progress = Callable[[float, str], None]
 FANOUT = 4
 
 
+class _Pulse:
+    """Пишет в лог, пока долгий запрос ещё не вернулся."""
+
+    def __init__(self, log: Log, message: str, every: float = 25.0):
+        self._log = log
+        self._message = message
+        self._every = every
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="drama-pulse", daemon=True)
+
+    def __enter__(self) -> _Pulse:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        self._stop.set()
+        self._thread.join(timeout=1)
+        return False
+
+    def _run(self) -> None:
+        waited = 0.0
+        while not self._stop.wait(self._every):
+            waited += self._every
+            self._log("info", f"{self._message}, прошло {int(waited)} с")
+
+
 def load_story(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -122,17 +148,18 @@ def ensure_story(
                 token.check()
                 index = outlines.index(chapter)
                 number = chapter.get("index", index + 1)
-                log("info", f"Проверка последовательности, глава {number}")
+                log("info", f"Проверка последовательности, глава {number}: жду ответ модели")
                 try:
-                    checked = _complete_json(
-                        llm,
-                        system=SYSTEM,
-                        user=consistency_prompt(story, chapter, language_line),
-                        temperature=0.2,
-                        max_tokens=max_tokens,
-                        log=log,
-                        allow_plain=True,
-                    )
+                    with _Pulse(log, f"Глава {number}: модель ещё отвечает"):
+                        checked = _complete_json(
+                            llm,
+                            system=SYSTEM,
+                            user=consistency_prompt(story, chapter, language_line),
+                            temperature=0.2,
+                            max_tokens=max_tokens,
+                            log=log,
+                            allow_plain=True,
+                        )
                 except ProviderError as exc:
                     log("warning", f"Глава {number} оставлена как есть: {exc}")
                     checked = {}
@@ -147,9 +174,12 @@ def ensure_story(
                     _note()
                 if changed:
                     log("info", f"Глава {number} поправлена после проверки")
+                else:
+                    log("info", f"Глава {number} проверена, текст оставлен")
                 _publish_ready(on_chapter_final, outlines, settings)
 
             _parallel(token, workers, pending_checks, check)
+            log("info", f"Проверка последовательности закончена: {len(outlines)} глав")
         story["consistency_done"] = True
         save_story(path, story)
 
@@ -160,6 +190,7 @@ def ensure_story(
     narration_path.write_text(narration, encoding="utf-8")
     story["narration"] = narration
     save_story(path, story)
+    log("info", f"Текст всех глав собран: {count_words(narration)} слов")
     progress(1.0, "story")
     return story
 

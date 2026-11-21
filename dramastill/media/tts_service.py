@@ -4,7 +4,7 @@ import hashlib
 import json
 import threading
 import wave
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from pathlib import Path
 
 from dramastill.cancel import CancelToken
@@ -193,6 +193,8 @@ class ChapterAudioPrefetch:
         self._lock = threading.Lock()
         self._pool = ThreadPoolExecutor(max_workers=speech_workers(settings), thread_name_prefix="drama-voice")
         self._inflight: dict[int, Future] = {}
+        self._texts: dict[int, str] = {}
+        self._wanted: dict[int, str] = {}
         self._announced = False
 
     def submit(self, story: dict) -> None:
@@ -201,54 +203,101 @@ class ChapterAudioPrefetch:
             plan = build_plan(story, self.settings)
         except ProviderError:
             return
+        speech = [item for item in plan if item.get("kind") == "speech"]
+        if not speech:
+            return
         speech_dir = self.work_dir / "audio" / "speech"
         speech_dir.mkdir(parents=True, exist_ok=True)
         with self._lock:
             if not self._announced:
                 self._announced = True
                 self.log("info", "Готовые главы озвучиваются, пока пишутся следующие")
-            for item in plan:
-                if item.get("kind") != "speech":
-                    continue
-                index = int(item["index"])
-                dest = speech_dir / f"{index:05d}.mp3"
-                if _audio_ok(self.ffprobe, dest):
-                    continue
+        queued = 0
+        for item in speech:
+            index = int(item["index"])
+            text = str(item["text"])
+            digest = _speech_digest(text)
+            dest = speech_dir / f"{index:05d}.mp3"
+            with self._lock:
+                self._texts[index] = text
+                self._wanted[index] = digest
+                current = self._inflight.get(index)
+                busy = current is not None and not current.done()
+            if busy:
+                continue
+            if _speech_matches(self.ffprobe, dest, text):
+                continue
+            dest.unlink(missing_ok=True)
+            dest.with_suffix(".txt").unlink(missing_ok=True)
+            with self._lock:
                 current = self._inflight.get(index)
                 if current is not None and not current.done():
                     continue
-                self._inflight[index] = self._pool.submit(self._speak, dict(item), dest)
+                self._inflight[index] = self._pool.submit(self._speak, index, dest)
+                queued += 1
+        if queued:
+            self.log("info", f"В озвучку добавлено фрагментов: {queued}")
 
     def wait(self) -> None:
         with self._lock:
-            futures = list(self._inflight.values())
+            pending = dict(self._inflight)
+        total = len(pending)
+        if total:
+            self.log("info", f"Жду окончания озвучки: {total} фрагментов")
+        done = 0
         error: Exception | None = None
-        for future in futures:
-            try:
-                future.result()
-            except Exception as exc:
-                error = exc
+        while pending:
+            finished, _waiting = wait(list(pending.values()), timeout=25, return_when=FIRST_COMPLETED)
+            if not finished:
+                self.token.check()
+                self.log("info", f"Озвучка ещё идёт: готово {done} из {total}")
+                continue
+            for future in finished:
+                index = next(key for key, item in pending.items() if item is future)
+                pending.pop(index, None)
+                try:
+                    future.result()
+                except Exception as exc:
+                    error = exc
+                    self.log("warning", f"Озвучка фрагмента {index + 1} не удалась: {exc}")
+                else:
+                    done += 1
+                    self.log("info", f"Озвучка фрагмента {index + 1} готова, {done} из {total}")
         self._pool.shutdown(wait=True)
+        if total:
+            self.log("info", "Озвучка фрагментов закончена")
         if error is not None:
             raise error
 
-    def _speak(self, item: dict, dest: Path) -> None:
-        self.token.check()
-        partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
-        if partial.exists():
-            partial.unlink()
-        self.provider.synthesize(
-            text=item["text"],
-            dest=partial,
-            voice=self.settings.voice,
-            speed=float(self.settings.speed),
-            emotion=self.settings.emotion,
-            language="",
-        )
-        if not _audio_ok(self.ffprobe, partial):
-            partial.unlink(missing_ok=True)
-            raise ProviderError(f"Пустой аудиофрагмент {item['index'] + 1}")
-        partial.replace(dest)
+    def _speak(self, index: int, dest: Path) -> None:
+        while True:
+            self.token.check()
+            with self._lock:
+                text = self._texts[index]
+                digest = self._wanted[index]
+            self.log("info", f"Озвучка фрагмента {index + 1} начата")
+            partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
+            if partial.exists():
+                partial.unlink()
+            self.provider.synthesize(
+                text=text,
+                dest=partial,
+                voice=self.settings.voice,
+                speed=float(self.settings.speed),
+                emotion=self.settings.emotion,
+                language="",
+            )
+            if not _audio_ok(self.ffprobe, partial):
+                partial.unlink(missing_ok=True)
+                raise ProviderError(f"Пустой аудиофрагмент {index + 1}")
+            with self._lock:
+                if self._wanted.get(index) != digest:
+                    partial.unlink(missing_ok=True)
+                    self.log("info", f"Озвучка фрагмента {index + 1} устарела после правки главы, повторяю")
+                    continue
+                partial.replace(dest)
+                dest.with_suffix(".txt").write_text(digest, encoding="utf-8")
+                return
 
 
 def speech_workers(settings: VoiceSettings) -> int:
@@ -287,7 +336,7 @@ def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, lo
     pending = []
     for item in items:
         dest = speech_dir / f"{item['index']:05d}.mp3"
-        if _audio_ok(ffprobe, dest):
+        if _speech_matches(ffprobe, dest, str(item["text"])):
             continue
         pending.append(item)
     done = len(items) - len(pending)
@@ -315,6 +364,7 @@ def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, lo
             partial.unlink(missing_ok=True)
             raise ProviderError(f"Пустой аудиофрагмент {item['index'] + 1}")
         partial.replace(dest)
+        dest.with_suffix(".txt").write_text(_speech_digest(str(item["text"])), encoding="utf-8")
         return item["index"]
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -324,6 +374,17 @@ def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, lo
             future.result()
             done += 1
             progress(done / len(items))
+
+
+def _speech_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _speech_matches(ffprobe: str, dest: Path, text: str) -> bool:
+    stamp = dest.with_suffix(".txt")
+    if not stamp.exists() or stamp.read_text(encoding="utf-8").strip() != _speech_digest(text):
+        return False
+    return _audio_ok(ffprobe, dest)
 
 
 def _audio_ok(ffprobe: str, path: Path) -> bool:
