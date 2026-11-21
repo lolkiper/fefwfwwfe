@@ -32,9 +32,15 @@ _ACTIVE_LOCK = threading.Lock()
 
 
 def subprocess_kwargs() -> dict:
-    if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-    return {}
+    if sys.platform != "win32":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": info,
+    }
 
 
 def _tool_filename(name: str) -> str:
@@ -199,14 +205,32 @@ def run_ffmpeg(
     def read() -> None:
         stderr_box.append(read_stderr())
 
+    stop_watch = threading.Event()
+
+    def watch_cancel() -> None:
+        if token is None:
+            return
+        while not stop_watch.wait(0.2):
+            if not token.requested:
+                continue
+            try:
+                process.kill()
+            except OSError:
+                return
+            return
+
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
+    watcher = threading.Thread(target=watch_cancel, daemon=True)
+    watcher.start()
     if frame_iter is not None:
         writer = threading.Thread(target=write_frames, daemon=True)
         writer.start()
         writer.join()
     code = process.wait()
+    stop_watch.set()
     reader.join()
+    watcher.join(timeout=1)
     with _ACTIVE_LOCK:
         _ACTIVE.discard(process)
     stderr = (stderr_box[0] if stderr_box else b"").decode("utf-8", errors="replace")
@@ -214,6 +238,8 @@ def run_ffmpeg(
         if isinstance(exc, BrokenPipeError):
             continue
         raise exc
+    if token is not None and token.requested:
+        token.check()
     if code != 0:
         tail = ffmpeg_error_text(stderr)
         raise FFmpegError(tail or f"ffmpeg завершился с кодом {code}")

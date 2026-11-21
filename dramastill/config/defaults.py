@@ -62,6 +62,8 @@ FLUX_BASE = "https://black-forest-labs-flux-1-schnell.hf.space"
 FLUX_MODEL = "flux-1-schnell"
 
 LLM_PRESETS: list[tuple[str, str, str, str]] = [
+    ("tokenlavka", "Tokenlavka Claude Fable 5.1", "https://tokenlavka.com/v1", "claude-fable-5-1"),
+    ("grok", "Grok 4.7 (ключ xAI, без паузы)", "https://api.x.ai/v1", "grok-4.7"),
     ("gemini", "Gemini 3.8 Flash (бесплатно)", "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-3.8-flash"),
     ("pollinations", "Pollinations GPT-OSS (без ключа)", POLLINATIONS_BASE, POLLINATIONS_MODEL),
     ("llm7", "LLM7 DeepSeek (нужен бесплатный токен)", LLM7_BASE, LLM7_MODEL),
@@ -193,7 +195,7 @@ class VoiceSettings:
     sentence_pause_ms: int = 0
     chapter_pause_ms: int = 700
     chunk_chars: int = 2800
-    parallelism: int = 2
+    parallelism: int = 10
     eleven_model: str = "eleven_multilingual_v2"
 
 

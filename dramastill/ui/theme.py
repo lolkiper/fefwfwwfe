@@ -58,6 +58,7 @@ QScrollBar:vertical { background: #12141c; width: 12px; }
 QScrollBar::handle:vertical { background: #3a4256; border-radius: 6px; }
 QCheckBox { spacing: 8px; }
 QStatusBar { background: #0e1016; color: #a39c90; }
+QLabel#balance { color: #f0d48a; padding: 0 12px; font-weight: 600; }
 """
 
 

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from PIL import Image
@@ -7,7 +9,7 @@ from PIL import Image
 from dramastill.config.defaults import ImageSettings
 from dramastill.providers.base import ImageProvider
 from dramastill.providers.errors import ProviderError
-from dramastill.story.image_prompt import build_image_prompt
+from dramastill.story.image_prompt import build_chapter_image_prompt, build_image_prompt
 
 
 def valid_image(path: Path) -> bool:
@@ -54,5 +56,104 @@ def ensure_image(
         if partial.exists():
             partial.unlink()
         raise
-    log("info", "Изображение сохранено. Другие кадры создаваться не будут")
+    log("info", "Изображение сохранено")
     return dest
+
+
+def ensure_chapter_images(
+    *,
+    story: dict,
+    settings: ImageSettings,
+    provider: ImageProvider,
+    directory: Path,
+    log,
+) -> list[Path]:
+    """Ровно одно изображение на главу. Повтор при ошибке касается только этого кадра."""
+    chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
+    if not chapters:
+        raise ProviderError("В истории нет глав для изображений")
+    directory.mkdir(parents=True, exist_ok=True)
+    total = len(chapters)
+    jobs = []
+    for offset, chapter in enumerate(chapters, start=1):
+        number = int(chapter.get("index") or offset)
+        dest = directory / f"chapter_{number:02d}.png"
+        prompt = build_chapter_image_prompt(story, chapter, settings, number, total)
+        jobs.append((number, dest, prompt))
+
+    def produce(number: int, dest: Path, prompt: str, suffix: str = "", force: bool = False) -> None:
+        prompt_path = dest.with_suffix(".prompt.txt")
+        stored = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
+        if not force and valid_image(dest) and stored.strip() == prompt.strip():
+            log("info", f"Глава {number}: изображение уже есть и повторно не генерируется")
+            return
+        last: Exception | None = None
+        for attempt in range(1, 4):
+            log("info", f"Глава {number}: генерируется своё изображение, попытка {attempt} из 3")
+            partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
+            if partial.exists():
+                partial.unlink()
+            try:
+                provider.generate(
+                    prompt=prompt + suffix,
+                    dest=partial,
+                    size=settings.size or "1792x1024",
+                    seed=None if settings.seed < 0 else settings.seed + number,
+                )
+                if not valid_image(partial):
+                    raise ProviderError(f"Глава {number}: сервис вернул повреждённое изображение")
+                partial.replace(dest)
+                prompt_path.write_text(prompt, encoding="utf-8")
+                log("info", f"Глава {number}: изображение сохранено, {dest.name}")
+                return
+            except Exception as exc:
+                last = exc
+                if partial.exists():
+                    partial.unlink()
+                log("warning", f"Глава {number}: изображение не собралось, попытка {attempt} из 3: {exc}")
+        raise ProviderError(str(last or f"Глава {number}: изображение не собралось"))
+
+    workers = min(3, len(jobs))
+    log("info", f"Изображения глав: {len(jobs)}, одновременно {workers}")
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(produce, number, dest, prompt) for number, dest, prompt in jobs]
+        for future in as_completed(futures):
+            future.result()
+    _reject_duplicate_stills(jobs, produce, log)
+    return [dest for _number, dest, _prompt in jobs]
+
+
+def _file_hash(path: Path) -> str:
+    digest = hashlib.sha256()
+    digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
+def _reject_duplicate_stills(jobs: list[tuple[int, Path, str]], produce, log) -> None:
+    seen: dict[str, int] = {}
+    for number, dest, prompt in jobs:
+        if not valid_image(dest):
+            raise ProviderError(f"Глава {number}: изображение отсутствует после генерации")
+        digest = _file_hash(dest)
+        previous = seen.get(digest)
+        if previous is None:
+            seen[digest] = number
+            log("info", f"Глава {number}: кадр уникален")
+            continue
+        log("warning", f"Глава {number}: кадр совпал с главой {previous}, запрашиваю другой ракурс")
+        produce(
+            number,
+            dest,
+            prompt,
+            "\nDifferent camera height, different gesture, different background detail. Do not repeat the earlier still.",
+            True,
+        )
+        prompt_file = dest.with_suffix(".prompt.txt")
+        if prompt_file.exists():
+            prompt_file.write_text(prompt, encoding="utf-8")
+        again = _file_hash(dest) if valid_image(dest) else ""
+        if again and again != digest and again not in seen:
+            seen[again] = number
+            log("info", f"Глава {number}: после повтора кадр отличается")
+        else:
+            log("warning", f"Глава {number}: сервис снова вернул тот же кадр, глава остаётся с ним")

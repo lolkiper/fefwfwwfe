@@ -33,6 +33,9 @@ def _excepthook(exc_type, exc, tb) -> None:
 def main() -> None:
     import multiprocessing
 
+    from dramastill.winquiet import hide_console_windows
+
+    hide_console_windows()
     multiprocessing.freeze_support()
     _keep_stdio()
     sys.excepthook = _excepthook

@@ -6,7 +6,8 @@ from typing import Any
 
 
 def extract_json(text: str) -> dict[str, Any]:
-    raw = (text or "").strip()
+    raw = (text or "").strip().lstrip("\ufeff")
+    raw = raw.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
     if raw.startswith("```"):
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.IGNORECASE)
         raw = re.sub(r"\s*```$", "", raw)
@@ -15,14 +16,50 @@ def extract_json(text: str) -> dict[str, Any]:
     if start < 0 or end <= start:
         raise ValueError("Модель не вернула JSON")
     blob = raw[start : end + 1]
-    try:
-        data = json.loads(blob)
-    except json.JSONDecodeError:
-        repaired = re.sub(r",\s*([}\]])", r"\1", blob)
-        data = json.loads(repaired)
+    data = _load_object(blob)
     if not isinstance(data, dict):
         raise ValueError("JSON должен быть объектом")
     return data
+
+
+def _load_object(blob: str) -> Any:
+    variants = [blob, _escape_string_breaks(blob)]
+    last: json.JSONDecodeError | None = None
+    for item in variants:
+        cleaned = re.sub(r",\s*([}\]])", r"\1", item)
+        for candidate in (item, cleaned):
+            try:
+                return json.loads(candidate)
+            except json.JSONDecodeError as exc:
+                last = exc
+    assert last is not None
+    raise last
+
+
+def _escape_string_breaks(blob: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for char in blob:
+        if escape:
+            out.append(char)
+            escape = False
+            continue
+        if char == "\\" and in_string:
+            out.append(char)
+            escape = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            out.append(char)
+            continue
+        if in_string and char == "\n":
+            out.append("\\n")
+            continue
+        if in_string and char == "\r":
+            continue
+        out.append(char)
+    return "".join(out)
 
 
 def split_sentences(text: str) -> list[str]:
@@ -60,6 +97,18 @@ def _hard_split(text: str, limit: int) -> list[str]:
     if len(pieces) == 1:
         return [text[index : index + limit].strip() for index in range(0, len(text), limit)]
     return pack_sentences(pieces, limit)
+
+
+def drop_repeated_sentences(text: str) -> str:
+    seen: set[str] = set()
+    kept: list[str] = []
+    for sentence in split_sentences(text):
+        key = " ".join(sentence.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(sentence)
+    return " ".join(kept)
 
 
 def prepare_narration(text: str) -> str:

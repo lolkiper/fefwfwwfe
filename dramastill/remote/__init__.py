@@ -22,12 +22,14 @@ def parse_worker_urls(value: str) -> list[str]:
     return found
 
 
-def choose_worker(workers: list[WorkerStatus], *, temp_limit: float = 82) -> str | None:
+def choose_worker(workers: list[WorkerStatus], *, temp_limit: float = 82, cpu_limit: float = 0) -> str | None:
     usable = []
     for worker in workers:
         if not worker.ok or not worker.accept:
             continue
         if worker.temp_c is not None and worker.temp_c >= temp_limit:
+            continue
+        if _cpu_blocked(worker, cpu_limit):
             continue
         usable.append(worker)
     if not usable:
@@ -36,10 +38,10 @@ def choose_worker(workers: list[WorkerStatus], *, temp_limit: float = 82) -> str
     return usable[0].url
 
 
-def assign_jobs(job_ids: list[str], workers: list[WorkerStatus], *, temp_limit: float = 82) -> dict[str, str]:
+def assign_jobs(job_ids: list[str], workers: list[WorkerStatus], *, temp_limit: float = 82, cpu_limit: float = 0) -> dict[str, str]:
     usable = []
     for worker in workers:
-        if worker.ok and worker.accept and (worker.temp_c is None or worker.temp_c < temp_limit):
+        if worker.ok and worker.accept and (worker.temp_c is None or worker.temp_c < temp_limit) and not _cpu_blocked(worker, cpu_limit):
             usable.append(worker)
     if not usable:
         return {}
@@ -50,3 +52,10 @@ def assign_jobs(job_ids: list[str], workers: list[WorkerStatus], *, temp_limit: 
         assigned[job_id] = url
         load[url] += 1
     return assigned
+
+
+def _cpu_blocked(worker: WorkerStatus, cpu_limit: float) -> bool:
+    if worker.cpu_percent is None:
+        return False
+    cap = float(cpu_limit) if cpu_limit and cpu_limit > 0 else 98.0
+    return worker.cpu_percent >= cap

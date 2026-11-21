@@ -1,3 +1,4 @@
+import json
 import subprocess
 import wave
 from pathlib import Path
@@ -56,6 +57,53 @@ def _frame(path: Path, second: float) -> np.ndarray:
         ]
     )
     return np.frombuffer(raw, dtype=np.uint8).reshape((360, 640, 3))
+
+
+def test_render_signature_changes_with_the_frame_and_roundtrips(tmp_path):
+    from dramastill.media.composer import _movie_signature
+
+    image = tmp_path / "still.png"
+    audio = tmp_path / "voice.wav"
+    image.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    settings = VideoSettings()
+    first = _movie_signature(
+        settings=settings,
+        fps=30,
+        total_frames=300,
+        slices=[(0, 300)],
+        image=image,
+        audio=audio,
+        particles=None,
+    )
+    restored = json.loads(json.dumps(first))
+    assert restored == first
+    settings.width = 1280
+    changed = _movie_signature(
+        settings=settings,
+        fps=30,
+        total_frames=300,
+        slices=[(0, 300)],
+        image=image,
+        audio=audio,
+        particles=None,
+    )
+    assert changed != first
+
+
+def test_audio_slice_is_rebuilt_when_it_does_not_match(tmp_path):
+    from dramastill.media.composer import _slice_reusable
+
+    master = tmp_path / "master.wav"
+    _audio(master)
+    short = tmp_path / "slice.wav"
+    with wave.open(str(short), "w") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(48000)
+        handle.writeframes(b"\x00\x00" * 4800)
+    assert _slice_reusable(short, master, 4.0) is False
+    assert _slice_reusable(master, master, 4.0) is True
 
 
 def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch):

@@ -327,6 +327,81 @@ def test_gemini_without_key_uses_pollinations(tmp_path):
     assert paid_route.api_key == "AIza-free-gemini-key"
 
 
+def test_grok_key_skips_the_slow_free_route(tmp_path):
+    secrets = SecretStore(tmp_path / "secrets")
+    secrets.set("llm", "xai-test-key")
+    settings = AppSettings()
+    provider = build_llm(settings, secrets)
+    assert provider.base_url == "https://api.x.ai/v1"
+    assert provider.model == "grok-4.7"
+    assert provider.retries_immediately() is True
+    assert "Grok" in describe_route(settings, secrets)
+    settings.llm.provider = "grok"
+    settings.llm.model = "grok-4.7"
+    secrets.set("llm", "")
+    try:
+        build_llm(settings, secrets)
+    except ProviderError as exc:
+        assert "console.x.ai" in str(exc)
+    else:
+        raise AssertionError("Grok без ключа не должен молча уходить на медленный маршрут")
+
+
+def test_tokenlavka_uses_its_gateway(tmp_path):
+    secrets = SecretStore(tmp_path / "secrets")
+    settings = AppSettings()
+    settings.llm.provider = "tokenlavka"
+    settings.llm.base_url = "https://tokenlavka.com/v1"
+    settings.llm.model = "claude-fable-5-1"
+    try:
+        build_llm(settings, secrets)
+    except ProviderError as exc:
+        assert "Tokenlavka" in str(exc)
+    else:
+        raise AssertionError("Tokenlavka без ключа не должна уходить на бесплатный маршрут")
+    secrets.set("llm", "xai-test-key")
+    provider = build_llm(settings, secrets)
+    assert isinstance(provider, OpenAICompatLLM)
+    assert provider.base_url == "https://tokenlavka.com/v1"
+    assert provider.model == "claude-fable-5-1"
+    assert provider.api_key == "xai-test-key"
+    assert provider.retries_immediately() is True
+    route = describe_route(settings, secrets)
+    assert "Tokenlavka" in route
+    assert "claude-fable-5-1" in route
+    settings.llm.model = "deepseek-v4.1-flash"
+    assert build_llm(settings, secrets).model == "deepseek-v4.1-flash"
+
+
+def test_tokenlavka_balance_reads_the_cabinet_remainder():
+    from dramastill.providers.tokenlavka import balance_view, format_balance
+
+    label, tip = format_balance({"key": {"balance": 1234567, "reserved": 20}})
+    assert label == "Баланс: 1 234 567"
+    assert "20" in tip
+    secret = "sk-testsecretvalue123456"
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        body = json.loads(request.content.decode())
+        assert body["key"] == secret
+        return httpx.Response(200, json={"key": {"balance": 42, "reserved": 0}})
+
+    label, tip = balance_view(secret, transport=httpx.MockTransport(handler))
+    assert seen["path"] == "/api/portal"
+    assert label == "Баланс: 42"
+    assert secret not in label
+    assert secret not in tip
+
+    def missing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, json={"error": "not_found"})
+
+    label, _tip = balance_view(secret, transport=httpx.MockTransport(missing))
+    assert label == "Баланс: ключ не найден"
+    assert secret not in label
+
+
 def test_factory_uses_edge_without_key(tmp_path):
     settings = AppSettings()
     settings.voice.provider = "edge"

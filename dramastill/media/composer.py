@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import wave
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -19,6 +20,33 @@ from dramastill.media.particles import LOOP_SECONDS
 from dramastill.media.resources import chunk_workers, encode_threads
 from dramastill.media.visualizer import BarRenderer, parse_color
 from dramastill.util import concat_path, even
+
+
+def _chapter_slices(
+    total_frames: int,
+    fps: int,
+    chunk_seconds: int,
+    spans: list[tuple[float, float, Path]],
+    fallback: Path,
+) -> list[tuple[int, int, Path]]:
+    usable = [(start, end, path) for start, end, path in spans if end > start and path is not None]
+    if not usable:
+        return [(start, count, fallback) for start, count in frame_slices(total_frames, fps, chunk_seconds)]
+    pieces: list[tuple[int, int, Path]] = []
+    cursor = 0
+    for index, (_start, end, path) in enumerate(usable):
+        if index == len(usable) - 1:
+            end_frame = total_frames
+        else:
+            end_frame = max(cursor, min(total_frames, int(round(end * fps))))
+        if end_frame <= cursor:
+            continue
+        for offset, count in frame_slices(end_frame - cursor, fps, chunk_seconds):
+            pieces.append((cursor + offset, count, path))
+        cursor = end_frame
+    if cursor < total_frames:
+        pieces.append((cursor, total_frames - cursor, usable[-1][2]))
+    return pieces
 
 
 def frame_slices(total_frames: int, fps: int, chunk_seconds: int) -> list[tuple[int, int]]:
@@ -45,6 +73,7 @@ def render_movie(
     token: CancelToken,
     log,
     progress,
+    chapter_spans: list[tuple[float, float, Path]] | None = None,
 ) -> Path:
     info = probe(ffprobe, audio)
     if info.duration <= 0.2:
@@ -55,38 +84,73 @@ def render_movie(
     audio_dir = work_dir / "audio" / "slices"
     chunks_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
-    slices = frame_slices(total_frames, fps, max(5, int(settings.chunk_seconds)))
+    slices = _chapter_slices(
+        total_frames,
+        fps,
+        max(5, int(settings.chunk_seconds)),
+        chapter_spans or [],
+        image,
+    )
     manifest = chunks_dir / "manifest.json"
+    signature = _movie_signature(
+        settings=settings,
+        fps=fps,
+        total_frames=total_frames,
+        slices=slices,
+        image=image,
+        audio=audio,
+        particles=particles,
+    )
+    reusable = False
+    if manifest.exists():
+        try:
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            saved = None
+        reusable = isinstance(saved, dict) and saved.get("signature") == signature
     manifest.write_text(
-        json.dumps({"fps": fps, "frames": total_frames, "slices": slices}),
+        json.dumps(
+            {"signature": signature, "fps": fps, "frames": total_frames, "slices": signature["slices"]},
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
     cache: dict = {}
     paths: list[Path | None] = [None] * len(slices)
-    jobs: list[tuple[int, int, int, Path, float]] = []
-    for index, (start, count) in enumerate(slices):
+    jobs: list[tuple[int, int, int, Path, float, Path]] = []
+    for index, (start, count, still) in enumerate(slices):
         token.check()
         dest = chunks_dir / f"{index:05d}.mkv"
         expected = count / fps
-        if _chunk_ready(ffprobe, dest, expected):
-            log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов")
+        if reusable and _chunk_ready(ffprobe, dest, expected):
+            log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов, кадр {still.name}")
             paths[index] = dest
             continue
         slice_audio = audio_dir / f"{index:05d}.wav"
         _slice_audio(ffmpeg, audio, slice_audio, start / fps, expected)
-        jobs.append((index, start, count, dest, expected))
+        jobs.append((index, start, count, dest, expected, still))
     done = len(slices) - len(jobs)
     if slices:
         progress(done / len(slices))
     workers = 1 if len(jobs) <= 1 else chunk_workers(settings)
     threads = encode_threads(settings, workers)
     if jobs:
-        log("info", f"Сборка фрагментов: {len(jobs)}, одновременно {workers}, потоков кодирования на фрагмент {threads}")
+        from dramastill.media.resources import allow_nvenc
 
-    def _job(item: tuple[int, int, int, Path, float]) -> int:
-        index, start, count, dest, expected = item
+        if allow_nvenc(settings):
+            log(
+                "info",
+                "Кодирование: NVIDIA NVENC. Плавный масштаб и crop остаются на процессоре, "
+                "потому что у покадрового движения нет фильтра CUDA.",
+            )
+        else:
+            log("info", "Кодирование фрагментов на процессоре")
+        log("info", f"Сборка фрагментов: {len(jobs)}, одновременно {workers}, потоков фильтра на фрагмент {threads}")
+
+    def _job(item: tuple[int, int, int, Path, float, Path]) -> int:
+        index, start, count, dest, expected, still = item
         token.check()
-        log("info", f"Собирается фрагмент {index + 1} из {len(slices)}")
+        log("info", f"Собирается фрагмент {index + 1} из {len(slices)}, кадр {still.name}")
         partial = dest.with_suffix(".partial.mkv")
         if partial.exists():
             partial.unlink()
@@ -94,7 +158,7 @@ def render_movie(
         try:
             _render_chunk(
                 ffmpeg=ffmpeg,
-                image=image,
+                image=still,
                 audio=slice_audio,
                 particles=particles,
                 bands=None if bands is None else bands[start : start + count],
@@ -160,7 +224,7 @@ def _chunk_ready(ffprobe: str, path: Path, expected: float) -> bool:
 
 
 def _slice_audio(ffmpeg: str, master: Path, dest: Path, start: float, duration: float) -> None:
-    if dest.exists() and dest.stat().st_size > 100:
+    if _slice_reusable(dest, master, duration):
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -379,6 +443,81 @@ def _filter_graph(
         f"apad=whole_dur={duration:.4f}[aout]"
     )
     return ";".join(parts)
+
+
+def _movie_signature(
+    *,
+    settings: VideoSettings,
+    fps: int,
+    total_frames: int,
+    slices: list[tuple[int, int]],
+    image: Path,
+    audio: Path,
+    particles: Path | None,
+) -> dict:
+    def mark(path: Path) -> list[int]:
+        stat = path.stat()
+        return [int(stat.st_size), int(stat.st_mtime)]
+
+    return {
+        "width": even(settings.width),
+        "height": even(settings.height),
+        "fps": fps,
+        "frames": total_frames,
+        "slices": [
+            [int(item[0]), int(item[1]), str(item[2])] if len(item) > 2 else [int(item[0]), int(item[1])]
+            for item in slices
+        ],
+        "bitrate": settings.video_bitrate,
+        "audio_bitrate": settings.audio_bitrate,
+        "encoder": settings.encoder,
+        "preset": settings.x264_preset,
+        "visualizer": bool(settings.visualizer),
+        "bars": int(settings.visualizer_bars),
+        "color": settings.visualizer_color,
+        "opacity": f"{float(settings.visualizer_opacity):.4f}",
+        "bar_height": int(settings.visualizer_height),
+        "gap": f"{float(settings.visualizer_gap):.4f}",
+        "smooth": f"{float(settings.visualizer_smooth):.4f}",
+        "vignette": f"{float(settings.vignette):.4f}",
+        "contrast": f"{float(settings.grade_contrast):.4f}",
+        "saturation": f"{float(settings.grade_saturation):.4f}",
+        "zoom": f"{float(settings.zoom_base):.5f}/{float(settings.zoom_amplitude):.5f}/{float(settings.zoom_period):.4f}",
+        "pan": (
+            f"{float(settings.pan_x_px):.3f}/{float(settings.pan_y_px):.3f}/"
+            f"{float(settings.pan_period_x):.3f}/{float(settings.pan_period_y):.3f}"
+        ),
+        "shake": f"{float(settings.shake_px):.3f}/{float(settings.shake_period):.3f}",
+        "image": mark(image),
+        "audio": mark(audio),
+        "particles": None if particles is None else mark(particles),
+    }
+
+
+def _slice_reusable(dest: Path, master: Path, expected: float) -> bool:
+    if not dest.exists() or dest.stat().st_size <= 100:
+        return False
+    try:
+        if dest.stat().st_mtime_ns + 1_000_000 < master.stat().st_mtime_ns:
+            return False
+    except OSError:
+        return False
+    measured = _wav_seconds(dest)
+    if measured is None:
+        return False
+    return abs(measured - expected) < 0.12
+
+
+def _wav_seconds(path: Path) -> float | None:
+    try:
+        with wave.open(str(path), "rb") as handle:
+            rate = handle.getframerate()
+            frames = handle.getnframes()
+    except (wave.Error, EOFError, OSError):
+        return None
+    if rate <= 0:
+        return None
+    return frames / float(rate)
 
 
 def _concat(ffmpeg: str, chunks: list[Path], dest: Path, audio_bitrate: str) -> None:

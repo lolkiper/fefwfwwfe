@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Callable
 
@@ -16,11 +18,38 @@ from dramastill.story.prompts import (
     continue_prompt,
     metadata_prompt,
 )
-from dramastill.story.textutil import extract_json, prepare_narration
+from dramastill.story.textutil import drop_repeated_sentences, extract_json, prepare_narration
 from dramastill.util import count_words
 
 Log = Callable[[str, str], None]
 Progress = Callable[[float, str], None]
+FANOUT = 4
+
+
+class _Pulse:
+    """Пишет в лог, пока долгий запрос ещё не вернулся."""
+
+    def __init__(self, log: Log, message: str, every: float = 25.0):
+        self._log = log
+        self._message = message
+        self._every = every
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="drama-pulse", daemon=True)
+
+    def __enter__(self) -> _Pulse:
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        self._stop.set()
+        self._thread.join(timeout=1)
+        return False
+
+    def _run(self) -> None:
+        waited = 0.0
+        while not self._stop.wait(self._every):
+            waited += self._every
+            self._log("info", f"{self._message}, прошло {int(waited)} с")
 
 
 def load_story(path: Path) -> dict:
@@ -55,51 +84,102 @@ def ensure_story(
         log("info", "Модель придумывает оригинальную историю и один драматический момент")
         story = _generate_concept(llm, settings, target_words, temperature, max_tokens, log)
         save_story(path, story)
-    progress(0.18, "story")
-
     outlines = story.get("chapters") or []
-    per_chapter = max(80, target_words // max(1, len(outlines)))
-    for index, chapter in enumerate(outlines):
-        token.check()
-        if (chapter.get("narration") or "").strip():
-            continue
-        log("info", f"Пишется глава {chapter.get('index', index + 1)} из {len(outlines)}")
-        previous = outlines[:index]
-        narration, summary = _write_chapter(
-            llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
-        )
-        chapter["narration"] = narration
-        if summary:
-            chapter["summary_actual"] = summary
-        save_story(path, story)
-        progress(0.18 + 0.62 * ((index + 1) / len(outlines)), "story")
-        if not settings.consistency_check:
-            _publish_ready(on_chapter_final, outlines, settings)
+    total = max(1, len(outlines))
+    per_chapter = max(40, target_words // total)
+    lock = threading.Lock()
+
+    def _note() -> None:
+        written = sum(1 for chapter in outlines if (chapter.get("narration") or "").strip())
+        checked = sum(1 for chapter in outlines if chapter.get("consistency_done"))
+        if settings.consistency_check:
+            fraction = 0.18 + 0.62 * (written / total) + 0.20 * (checked / total)
+        else:
+            fraction = 0.18 + 0.82 * (written / total)
+        progress(min(0.99, fraction), "story")
+
+    _note()
+    pending = [chapter for chapter in outlines if not (chapter.get("narration") or "").strip()]
+    if pending:
+        workers = min(FANOUT, len(pending))
+        log("info", f"Главы пишутся одновременно: {workers}. Ошибка одной главы не стирает остальные")
+
+        def write(chapter: dict) -> None:
+            token.check()
+            index = outlines.index(chapter)
+            number = chapter.get("index", index + 1)
+            log("info", f"Пишется глава {number} из {len(outlines)}")
+            previous = [_chapter_context(item) for item in outlines[:index]]
+            narration = ""
+            summary = ""
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                token.check()
+                try:
+                    narration, summary = _write_chapter(
+                        llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
+                    )
+                    last_error = None
+                    break
+                except ProviderError as exc:
+                    last_error = exc
+                    log("warning", f"Глава {number}, попытка {attempt} из 3: {exc}")
+            if last_error is not None or not narration.strip():
+                raise ProviderError(str(last_error or f"Глава {number} не получила текст"))
+            with lock:
+                chapter["narration"] = narration
+                if summary:
+                    chapter["summary_actual"] = summary
+                save_story(path, story)
+                _note()
+            if not settings.consistency_check:
+                _publish_ready(on_chapter_final, outlines, settings)
+
+        _parallel(token, workers, pending, write)
 
     if settings.consistency_check and not story.get("consistency_done"):
         language_line = language_instruction(settings.language, settings.custom_language)
-        for index, chapter in enumerate(outlines):
-            token.check()
-            if chapter.get("consistency_done"):
-                continue
-            log("info", f"Проверка последовательности, глава {chapter.get('index', index + 1)}")
-            checked = _complete_json(
-                llm,
-                system=SYSTEM,
-                user=consistency_prompt(story, chapter, language_line),
-                temperature=0.2,
-                max_tokens=max_tokens,
-                log=log,
-            )
-            if checked.get("changed") and (checked.get("narration") or "").strip():
-                chapter["narration"] = prepare_narration(str(checked["narration"]))
-                if checked.get("summary"):
-                    chapter["summary_actual"] = str(checked["summary"]).strip()
-                log("info", f"Глава {chapter.get('index', index + 1)} поправлена после проверки")
-            chapter["consistency_done"] = True
-            save_story(path, story)
-            _publish_ready(on_chapter_final, outlines, settings)
-            progress(0.82 + 0.18 * ((index + 1) / len(outlines)), "story")
+        pending_checks = [chapter for chapter in outlines if not chapter.get("consistency_done")]
+        if pending_checks:
+            workers = min(FANOUT, len(pending_checks))
+            log("info", f"Проверка последовательности одновременно: {workers}")
+
+            def check(chapter: dict) -> None:
+                token.check()
+                index = outlines.index(chapter)
+                number = chapter.get("index", index + 1)
+                log("info", f"Проверка последовательности, глава {number}: жду ответ модели")
+                try:
+                    with _Pulse(log, f"Глава {number}: модель ещё отвечает"):
+                        checked = _complete_json(
+                            llm,
+                            system=SYSTEM,
+                            user=consistency_prompt(story, chapter, language_line),
+                            temperature=0.2,
+                            max_tokens=max_tokens,
+                            log=log,
+                            allow_plain=True,
+                        )
+                except ProviderError as exc:
+                    log("warning", f"Глава {number} оставлена как есть: {exc}")
+                    checked = {}
+                changed = bool(checked.get("changed") and (checked.get("narration") or "").strip())
+                with lock:
+                    if changed:
+                        chapter["narration"] = prepare_narration(str(checked["narration"]))
+                        if checked.get("summary"):
+                            chapter["summary_actual"] = str(checked["summary"]).strip()
+                    chapter["consistency_done"] = True
+                    save_story(path, story)
+                    _note()
+                if changed:
+                    log("info", f"Глава {number} поправлена после проверки")
+                else:
+                    log("info", f"Глава {number} проверена, текст оставлен")
+                _publish_ready(on_chapter_final, outlines, settings)
+
+            _parallel(token, workers, pending_checks, check)
+            log("info", f"Проверка последовательности закончена: {len(outlines)} глав")
         story["consistency_done"] = True
         save_story(path, story)
 
@@ -110,6 +190,7 @@ def ensure_story(
     narration_path.write_text(narration, encoding="utf-8")
     story["narration"] = narration
     save_story(path, story)
+    log("info", f"Текст всех глав собран: {count_words(narration)} слов")
     progress(1.0, "story")
     return story
 
@@ -120,12 +201,33 @@ def _publish_ready(callback: Callable[[dict], None] | None, outlines: list, sett
     ready = []
     for chapter in outlines:
         if not (chapter.get("narration") or "").strip():
-            continue
+            break
         if settings.consistency_check and not chapter.get("consistency_done"):
-            continue
+            break
         ready.append(dict(chapter))
     if ready:
         callback({"chapters": ready})
+
+
+def _chapter_context(chapter: dict) -> dict:
+    return {
+        "index": chapter.get("index"),
+        "summary": chapter.get("summary_actual") or chapter.get("summary") or "",
+        "narration": chapter.get("narration") or "",
+    }
+
+
+def _parallel(token: CancelToken, workers: int, items: list, job: Callable) -> None:
+    if workers <= 1 or len(items) <= 1:
+        for item in items:
+            token.check()
+            job(item)
+        return
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(job, item) for item in items]
+        for future in as_completed(futures):
+            token.check()
+            future.result()
 
 
 def ensure_metadata(
@@ -209,6 +311,12 @@ def _normalize_concept(data: dict) -> dict:
             continue
         appearance = str(person.get("appearance") or "").strip()
         name = str(person.get("name") or "").strip()
+        role = str(person.get("role") or "").strip()
+        wardrobe = str(person.get("wardrobe") or "").strip()
+        appearance = " ".join(part for part in (appearance, wardrobe, role) if part)
+        appearance = " ".join(appearance.split())
+        if name and len(appearance) < 40:
+            appearance = f"{appearance} Adult with a realistic face, natural skin, and ordinary clothes.".strip()
         if not name or len(appearance) < 40:
             continue
         characters.append(
@@ -225,8 +333,8 @@ def _normalize_concept(data: dict) -> dict:
     for index, chapter in enumerate(data.get("chapters") or [], start=1):
         if not isinstance(chapter, dict):
             continue
-        summary = str(chapter.get("summary") or "").strip()
-        if len(summary) < 20:
+        summary = str(chapter.get("summary") or chapter.get("title") or "").strip()
+        if len(summary) < 8:
             continue
         chapters.append(
             {
@@ -236,7 +344,7 @@ def _normalize_concept(data: dict) -> dict:
                 "purpose": str(chapter.get("purpose") or "").strip(),
             }
         )
-    moment = str(data.get("dramatic_moment") or "").strip()
+    moment = _dramatic_moment(data, characters, chapters)
     title = str(data.get("title") or "").strip()
     if len(characters) < 1:
         raise ValueError("В концепции нет устойчивого описания персонажа")
@@ -260,61 +368,131 @@ def _normalize_concept(data: dict) -> dict:
     }
 
 
+def _dramatic_moment(data: dict, characters: list[dict], chapters: list[dict]) -> str:
+    moment = str(data.get("dramatic_moment") or data.get("moment") or data.get("scene") or "").strip()
+    if len(moment) >= 40:
+        return " ".join(moment.split())
+    names = ", ".join(str(person.get("name") or "").strip() for person in characters[:3] if person.get("name"))
+    pieces = [
+        moment,
+        f"One cinematic 16:9 photograph of {names}." if names else "",
+        str(data.get("logline") or "").strip(),
+        chapters[0]["summary"] if chapters else "",
+    ]
+    built = " ".join(part for part in pieces if part)
+    return " ".join(built.split())
+
+
 def _concept_ready(story: dict) -> bool:
     return bool(story.get("chapters") and story.get("dramatic_moment") and story.get("characters"))
 
 
 def _write_chapter(llm, settings, story, chapter, previous, target_words, temperature, max_tokens, log: Log) -> tuple[str, str]:
     language_line = language_instruction(settings.language, settings.custom_language)
-    data = _complete_json(
-        llm,
-        system=SYSTEM,
-        user=chapter_prompt(settings, story, chapter, previous, target_words),
-        temperature=temperature,
-        max_tokens=max_tokens,
-        log=log,
-    )
-    narration = prepare_narration(str(data.get("narration") or ""))
-    summary = str(data.get("summary") or "").strip()
-    if count_words(narration) < int(target_words * 0.55):
-        log("info", f"Глава {chapter.get('index')} короче плана, модель дополняет её")
-        expanded = _complete_json(
+    number = chapter.get("index")
+    floor = max(30, int(target_words * 0.85))
+    narration = ""
+    summary = ""
+    prompt = chapter_prompt(settings, story, chapter, previous, target_words)
+    for attempt in range(3):
+        data = _complete_json(
             llm,
             system=SYSTEM,
-            user=continue_prompt(chapter, narration, target_words, language_line),
+            user=prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             log=log,
+            allow_plain=True,
+            required=("narration",),
         )
-        longer = prepare_narration(str(expanded.get("narration") or ""))
-        if count_words(longer) > count_words(narration):
-            narration = longer
-            summary = str(expanded.get("summary") or summary).strip()
+        candidate = drop_repeated_sentences(prepare_narration(str(data.get("narration") or "")))
+        if count_words(candidate) > count_words(narration):
+            narration = candidate
+            summary = str(data.get("summary") or summary).strip()
+        words = count_words(narration)
+        log("info", f"Глава {number}: {words} слов при плане около {target_words}")
+        if words >= floor:
+            return narration, summary
+        log("info", f"Глава {number} короче плана, модель дополняет её")
+        prompt = continue_prompt(chapter, narration, target_words, language_line)
     if count_words(narration) < 30:
-        raise ProviderError(f"Глава {chapter.get('index')} не получила текст")
+        raise ProviderError(f"Глава {number} не получила текст")
+    log("warning", f"Глава {number} осталась короче плана: {count_words(narration)} слов из {target_words}")
     return narration, summary
 
 
-def _complete_json(llm: LLMProvider, *, system: str, user: str, temperature: float, max_tokens: int, log: Log) -> dict:
-    result = llm.complete(
-        system=system,
-        user=user,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        json_mode=True,
-    )
-    try:
-        return extract_json(result.text)
-    except (ValueError, json.JSONDecodeError):
-        log("warning", "Ответ модели был не JSON, повторяю запрос")
-        repaired = llm.complete(
+def _complete_json(
+    llm: LLMProvider,
+    *,
+    system: str,
+    user: str,
+    temperature: float,
+    max_tokens: int,
+    log: Log,
+    allow_plain: bool = False,
+    required: tuple[str, ...] = (),
+) -> dict:
+    immediate = bool(getattr(llm, "retries_immediately", lambda: True)())
+    attempts = 3 if immediate else 1
+    prompt = user
+    last_error = "ответ не является JSON-объектом"
+    for attempt in range(1, attempts + 1):
+        result = llm.complete(
             system=system,
-            user="TASK: json_repair\nReturn one valid JSON object only, no markdown.\n" + result.text[:12000],
-            temperature=0.1,
+            user=prompt,
+            temperature=0.1 if attempt > 1 else temperature,
             max_tokens=max_tokens,
             json_mode=True,
         )
-        try:
-            return extract_json(repaired.text)
-        except (ValueError, json.JSONDecodeError) as exc:
-            raise ProviderError("Модель не вернула пригодный JSON") from exc
+        parsed, error = _parse_model_json(result.text, allow_plain=allow_plain, required=required)
+        if parsed is not None:
+            if attempt > 1:
+                log("info", f"JSON принят с попытки {attempt}. Ошибка прошлого ответа: {error or last_error}")
+            return parsed
+        last_error = error or last_error
+        log("warning", f"Ответ модели был не JSON, попытка {attempt} из {attempts}: {last_error}")
+        if attempt == attempts:
+            break
+        if not immediate:
+            break
+        prompt = (
+            "TASK: json_repair\n"
+            "Return one valid JSON object only, no markdown.\n"
+            f"Parser error: {last_error}\n"
+            "Required fields: "
+            + ", ".join(required or ("a JSON object",))
+            + "\n"
+            + result.text[:12000]
+        )
+    if not immediate:
+        raise ProviderError(
+            "Модель не вернула пригодный JSON. Повтор сразу пропущен, чтобы не ждать 46 секунд. "
+            "Для истории без этой паузы выберите Grok и вставьте ключ с console.x.ai."
+        )
+    raise ProviderError(f"Модель не вернула пригодный JSON: {last_error}")
+
+
+def _parse_model_json(
+    text: str,
+    *,
+    allow_plain: bool,
+    required: tuple[str, ...] = (),
+) -> tuple[dict | None, str]:
+    try:
+        data = extract_json(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        data = None
+        error = str(exc)
+    else:
+        error = ""
+    if data is None and allow_plain:
+        prose = prepare_narration(text)
+        if count_words(prose) >= 30 and "{" not in prose:
+            data = {"narration": prose, "summary": "", "changed": True}
+            error = ""
+    if data is None:
+        return None, error or "ответ не является JSON-объектом"
+    missing = [key for key in required if not str(data.get(key) or "").strip()]
+    if missing:
+        return None, "нет полей: " + ", ".join(missing)
+    return data, error

@@ -75,7 +75,11 @@ def with_retries(
             else:
                 delay = min(90.0, exc.retry_after)
             if delay >= 5 and on_wait is not None:
-                on_wait(f"Лимит бесплатной модели: пауза {max(1, int(delay + 0.5))} с, запрос продолжится сам")
+                seconds = max(1, int(delay + 0.5))
+                if "free limit" in str(exc).lower():
+                    on_wait(f"Лимит бесплатной модели: пауза {seconds} с, запрос продолжится сам")
+                else:
+                    on_wait(f"Сервис просит паузу {seconds} с, запрос продолжится сам")
             sleep_until(delay, stop_check)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last = exc

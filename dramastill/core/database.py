@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dramastill.config.defaults import AppSettings, app_settings_from_dict
@@ -162,21 +163,42 @@ class Database:
 
     def recover_interrupted(self) -> int:
         with self._lock:
-            cursor = self._conn.execute(
-                """
-                UPDATE projects
-                SET status='paused',
-                    updated_at=?,
-                    error=CASE
-                        WHEN error IS NULL OR error='' THEN 'Работа прервана. Её можно продолжить.'
-                        ELSE error
-                    END
-                WHERE status='running'
-                """,
-                (now_iso(),),
-            )
+            rows = self._conn.execute(
+                "SELECT id, started_at, elapsed_seconds FROM projects WHERE status='running'"
+            ).fetchall()
+            now = datetime.now(timezone.utc)
+            stamp = now_iso()
+            count = 0
+            for row in rows:
+                elapsed = float(row["elapsed_seconds"] or 0)
+                started_at = row["started_at"]
+                if started_at:
+                    try:
+                        started = datetime.fromisoformat(started_at)
+                    except ValueError:
+                        started = None
+                    if started is not None:
+                        if started.tzinfo is None:
+                            started = started.replace(tzinfo=timezone.utc)
+                        elapsed += max(0.0, (now - started).total_seconds())
+                self._conn.execute(
+                    """
+                    UPDATE projects
+                    SET status='paused',
+                        updated_at=?,
+                        started_at=NULL,
+                        elapsed_seconds=?,
+                        error=CASE
+                            WHEN error IS NULL OR error='' THEN 'Работа прервана. Её можно продолжить.'
+                            ELSE error
+                        END
+                    WHERE id=? AND status='running'
+                    """,
+                    (stamp, elapsed, row["id"]),
+                )
+                count += 1
             self._conn.commit()
-            return int(cursor.rowcount)
+            return count
 
     def add_log(self, project_id: str, level: str, message: str) -> None:
         with self._lock:
