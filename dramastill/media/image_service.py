@@ -9,7 +9,7 @@ from PIL import Image
 from dramastill.config.defaults import ImageSettings
 from dramastill.providers.base import ImageProvider
 from dramastill.providers.errors import ProviderError
-from dramastill.providers.image import take_image_note
+from dramastill.providers.image import bind_image_log, take_image_note
 from dramastill.story.image_prompt import build_chapter_image_prompt, build_image_prompt
 
 
@@ -89,6 +89,7 @@ def ensure_chapter_images(
             log("info", f"Глава {number}: изображение уже есть и повторно не генерируется")
             return
         last: Exception | None = None
+        bind_image_log(log)
         for attempt in range(1, 4):
             log("info", f"Глава {number}: генерируется своё изображение, попытка {attempt} из 3")
             partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")

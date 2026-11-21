@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import threading
+import time
 from pathlib import Path
 from urllib.parse import quote
 
@@ -15,6 +16,8 @@ from dramastill.providers.llm import _error_message
 from dramastill.providers.retry import RETRY_STATUSES, with_retries
 
 _FLUX_LOCK = threading.Lock()
+_BACKUP_LOCK = threading.Lock()
+_backup_not_before = 0.0
 _IMAGE_NOTE = threading.local()
 
 
@@ -26,6 +29,16 @@ def take_image_note() -> str:
 
 def _remember(message: str) -> None:
     _IMAGE_NOTE.message = message
+
+
+def bind_image_log(log) -> None:
+    _IMAGE_NOTE.log = log
+
+
+def _image_log(level: str, message: str) -> None:
+    log = getattr(_IMAGE_NOTE, "log", None)
+    if log is not None:
+        log(level, message)
 
 
 _NEGATIVE = (
@@ -49,8 +62,8 @@ class FluxSchnellImageProvider:
         chosen = 0 if seed is None or seed < 0 else int(seed) % 2147483647
         randomize = seed is None or seed < 0
         if self._flux_blocked:
-            _from_pollinations(_safe_still_prompt(text), dest, width, height, self._transport)
-            _remember("кадр взят с запасного адреса, FLUX недоступен")
+            note = _from_pollinations(_safe_still_prompt(text), dest, width, height, chosen, self._transport)
+            _remember(note or "кадр взят с запасного адреса, FLUX недоступен")
             return
         try:
             with _FLUX_LOCK:
@@ -66,8 +79,8 @@ class FluxSchnellImageProvider:
             return
         except ProviderError:
             self._flux_blocked = True
-        _from_pollinations(_safe_still_prompt(text), dest, width, height, self._transport)
-        _remember("кадр взят с запасного адреса")
+        note = _from_pollinations(_safe_still_prompt(text), dest, width, height, chosen, self._transport)
+        _remember(note or "кадр взят с запасного адреса")
 
     def _draw(self, body: str, dest: Path, width: int, height: int, chosen: int, randomize: bool) -> None:
         def once() -> None:
@@ -232,15 +245,73 @@ def _flux_give_up(exc: ProviderError) -> bool:
     return _filter_block(exc) or "не вернул" in text or "занят" in text or "скрыл" in text
 
 
-def _from_pollinations(prompt: str, dest: Path, width: int, height: int, transport: httpx.BaseTransport | None) -> None:
-    text = quote(prompt[:700], safe="")
+def _from_pollinations(
+    prompt: str,
+    dest: Path,
+    width: int,
+    height: int,
+    seed: int,
+    transport: httpx.BaseTransport | None,
+) -> str:
+    """Один бесплатный кадр в 45 секунд. Остальные запросы ждут, а не падают пачкой."""
+    global _backup_not_before
+    text = quote(f"{prompt[:420]} Still {seed}.", safe="")
     url = f"https://image.pollinations.ai/prompt/{text}"
     timeout = httpx.Timeout(90, connect=20)
-    with httpx.Client(timeout=timeout, follow_redirects=True, transport=transport) as client:
-        response = client.get(url, params={"width": width, "height": height, "nologo": "true", "model": "flux"})
-    if response.status_code >= 400 or not _looks_like_image(response.content):
-        raise ProviderError("Запасной адрес не вернул изображение", retryable=True)
-    _write_png(response.content, dest)
+    for _attempt in range(5):
+        with _BACKUP_LOCK:
+            pause = _backup_not_before - time.monotonic()
+            if pause > 0:
+                seconds = max(1, int(pause + 0.5))
+                _image_log("info", f"Запасной адрес: одна картинка в 45 с, пауза {seconds} с")
+                time.sleep(min(pause, 50))
+            try:
+                with httpx.Client(timeout=timeout, follow_redirects=True, transport=transport) as client:
+                    response = client.get(
+                        url,
+                        params={
+                            "width": width,
+                            "height": height,
+                            "nologo": "true",
+                            "model": "flux",
+                            "seed": str(seed),
+                        },
+                    )
+            except (httpx.TimeoutException, httpx.TransportError):
+                _backup_not_before = time.monotonic() + 5
+                continue
+            if response.status_code < 400 and _looks_like_image(response.content):
+                _backup_not_before = time.monotonic() + 1
+                _write_png(response.content, dest)
+                return ""
+            if response.status_code == 402 or b"FREE_LIMIT" in response.content[:400]:
+                delay = _retry_delay(response)
+                _backup_not_before = time.monotonic() + delay
+                continue
+            _backup_not_before = time.monotonic() + 5
+    _local_still(dest, width, height, seed)
+    return "сервисы картинок не ответили, кадр собран на месте"
+
+
+def _retry_delay(response: httpx.Response) -> float:
+    header = response.headers.get("retry-after") or response.headers.get("Retry-After")
+    if header:
+        try:
+            return min(50.0, max(5.0, float(header)))
+        except ValueError:
+            pass
+    return 45.0
+
+
+def _local_still(dest: Path, width: int, height: int, seed: int) -> None:
+    from PIL import Image, ImageDraw
+
+    tone = seed % 9
+    image = Image.new("RGB", (width, height), (16 + tone * 3, 18, 24 + tone * 2))
+    draw = ImageDraw.Draw(image)
+    left = width // 6 + tone * 8
+    draw.ellipse((left, height // 7, left + width // 2, height * 2 // 3), fill=(64 + tone * 6, 54, 42))
+    image.save(dest, "PNG")
 
 
 def _filter_block(exc: ProviderError) -> bool:

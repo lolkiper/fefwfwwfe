@@ -348,6 +348,39 @@ def test_flux_uses_pollinations_after_the_space_hides_every_answer(tmp_path, mon
     assert dest.read_bytes() == payload
 
 
+def test_backup_image_waits_out_the_free_limit(tmp_path, monkeypatch):
+    import dramastill.providers.image as image
+
+    image._backup_not_before = 0.0
+    waits: list[float] = []
+    monkeypatch.setattr(image.time, "sleep", lambda seconds: waits.append(seconds))
+    payload = _png()
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "pollinations.ai" in str(request.url):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(402, headers={"retry-after": "22"}, json={"error": {"code": "FREE_LIMIT"}})
+            return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"event_id": "evt"})
+        return httpx.Response(200, text="event: error\ndata: null\n\n")
+
+    dest = tmp_path / "still.png"
+    try:
+        FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler)).generate(
+            prompt="A quiet room",
+            dest=dest,
+            size="1280x720",
+            seed=2,
+        )
+    finally:
+        image._backup_not_before = 0.0
+    assert dest.read_bytes() == payload
+    assert waits and waits[0] >= 20
+
+
 def test_saved_pollinations_settings_move_off_that_service():
     from dramastill.config.defaults import app_settings_from_dict
 
