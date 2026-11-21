@@ -117,17 +117,25 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
     cores = cpu_count()
     budget = settings.cpu_threads if settings.cpu_threads > 0 else cores
     sensors = bool(reading.sensors_ok and temp is not None)
-    if quiet or (mode == "cool" and not sensors):
-        workers = 1
-    elif sensors and state.level == 0 and not hot:
-        workers = min(10, max(1, budget))
+    cpu_now = reading.cpu_percent
+    busy = state.level >= 1 or hot or (cpu_now is not None and cpu_now >= 80)
+    if settings.encoder == "libx264" or quiet or state.level >= 2:
+        nvenc = False
+    elif settings.encoder == "h264_nvenc":
+        nvenc = state.level < 2
     else:
+        nvenc = not quiet and state.level < 2
+    if quiet or (mode == "cool" and not sensors) or busy:
         workers = 1
-    if state.level >= 1:
-        workers = 1
+    elif nvenc:
+        workers = 2 if budget >= 4 else 1
+    else:
+        workers = 2 if budget >= 8 else 1
     threads = max(1, budget // workers)
     if quiet:
         threads = min(threads, 2)
+    elif nvenc:
+        threads = min(threads, max(2, cores // 4))
     elif mode == "balanced" or (mode == "cool" and not sensors):
         threads = min(threads, max(1, cores // 2))
     if state.level == 1:
@@ -150,15 +158,6 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
     if state.level >= 2 or (ram_cap > 0 and reading.rss_mb is not None and reading.rss_mb > ram_cap):
         projects = 0
 
-    if settings.encoder == "libx264":
-        nvenc = False
-    elif settings.encoder == "h264_nvenc" and state.level < 2:
-        nvenc = True
-    elif mode == "cool" and sensors and state.level == 0 and not quiet:
-        nvenc = True
-    else:
-        nvenc = False
-
     nice = {"eco": 10, "balanced": 5, "cool": 1}[mode]
     if mode == "cool" and not sensors:
         nice = 5
@@ -169,7 +168,7 @@ def evaluate(settings: VideoSettings, reading: Reading, state: CoolingState, now
     if state.level >= 2:
         nice += 6
     nice = min(19, nice)
-    summary = _summary(mode, state.level, projects, threads, workers, sensors, temp, reading)
+    summary = _summary(mode, state.level, projects, threads, workers, sensors, temp, reading, nvenc)
     decision = Decision(
         mode=mode,
         level=state.level,
@@ -285,21 +284,39 @@ def _is_cool(settings: VideoSettings, reading: Reading, temp: float | None, warn
     return temp <= warning - 4 and cpu_ok and gpu_ok
 
 
-def _summary(mode: str, level: int, projects: int, threads: int, workers: int, sensors: bool, temp: float | None, reading: Reading) -> str:
+def _summary(
+    mode: str,
+    level: int,
+    projects: int,
+    threads: int,
+    workers: int,
+    sensors: bool,
+    temp: float | None,
+    reading: Reading,
+    nvenc: bool,
+) -> str:
     names = {"eco": "эко", "balanced": "баланс", "cool": "холодная скорость"}
     heat = f"{temp:.0f}°C" if temp is not None else "датчика температуры нет"
     gpu = ""
     if reading.gpu_temp_c is not None:
         gpu = f", видеокарта {reading.gpu_temp_c:.0f}°C"
+    usage = ""
+    if reading.cpu_percent is not None:
+        usage += f" CPU {reading.cpu_percent:.0f}%."
+    if reading.gpu_percent is not None:
+        usage += f" GPU {reading.gpu_percent:.0f}%."
+    if reading.rss_mb is not None:
+        usage += f" Память процесса {reading.rss_mb:.0f} МБ."
+    coder = " Кодирование NVIDIA NVENC." if nvenc else " Кодирование на процессоре."
     hold = ""
     if level == 1:
         hold = " Нагрузка снижена: температура или заданный потолок."
     elif level >= 2:
-        hold = " Новые проекты на паузе, пока машина не остынет."
+        hold = " Новые проекты на паузе, пока машина не остынет. Уже запущенные фрагменты не выбрасываются."
     sensor = "" if sensors else " Без датчика действует осторожный потолок."
     return (
-        f"Охлаждение: {names[mode]}, {heat}{gpu}. "
-        f"Проектов до {projects}, фрагментов {workers}, потоков кодирования {threads}.{sensor}{hold}"
+        f"Охлаждение: {names[mode]}, {heat}{gpu}.{usage} "
+        f"Проектов до {projects}, фрагментов {workers}, потоков кодирования {threads}.{coder}{sensor}{hold}"
     )
 
 

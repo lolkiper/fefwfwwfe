@@ -18,12 +18,12 @@ from dramastill.story.prompts import (
     continue_prompt,
     metadata_prompt,
 )
-from dramastill.story.textutil import extract_json, prepare_narration
+from dramastill.story.textutil import drop_repeated_sentences, extract_json, prepare_narration
 from dramastill.util import count_words
 
 Log = Callable[[str, str], None]
 Progress = Callable[[float, str], None]
-FANOUT = 10
+FANOUT = 4
 
 
 def load_story(path: Path) -> dict:
@@ -60,7 +60,7 @@ def ensure_story(
         save_story(path, story)
     outlines = story.get("chapters") or []
     total = max(1, len(outlines))
-    per_chapter = max(80, target_words // total)
+    per_chapter = max(40, target_words // total)
     lock = threading.Lock()
 
     def _note() -> None:
@@ -76,16 +76,30 @@ def ensure_story(
     pending = [chapter for chapter in outlines if not (chapter.get("narration") or "").strip()]
     if pending:
         workers = min(FANOUT, len(pending))
-        log("info", f"Главы пишутся одновременно: {workers}")
+        log("info", f"Главы пишутся одновременно: {workers}. Ошибка одной главы не стирает остальные")
 
         def write(chapter: dict) -> None:
             token.check()
             index = outlines.index(chapter)
-            log("info", f"Пишется глава {chapter.get('index', index + 1)} из {len(outlines)}")
+            number = chapter.get("index", index + 1)
+            log("info", f"Пишется глава {number} из {len(outlines)}")
             previous = [_chapter_context(item) for item in outlines[:index]]
-            narration, summary = _write_chapter(
-                llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
-            )
+            narration = ""
+            summary = ""
+            last_error: Exception | None = None
+            for attempt in range(1, 4):
+                token.check()
+                try:
+                    narration, summary = _write_chapter(
+                        llm, settings, story, chapter, previous, per_chapter, temperature, max_tokens, log
+                    )
+                    last_error = None
+                    break
+                except ProviderError as exc:
+                    last_error = exc
+                    log("warning", f"Глава {number}, попытка {attempt} из 3: {exc}")
+            if last_error is not None or not narration.strip():
+                raise ProviderError(str(last_error or f"Глава {number} не получила текст"))
             with lock:
                 chapter["narration"] = narration
                 if summary:
@@ -344,34 +358,35 @@ def _concept_ready(story: dict) -> bool:
 
 def _write_chapter(llm, settings, story, chapter, previous, target_words, temperature, max_tokens, log: Log) -> tuple[str, str]:
     language_line = language_instruction(settings.language, settings.custom_language)
-    data = _complete_json(
-        llm,
-        system=SYSTEM,
-        user=chapter_prompt(settings, story, chapter, previous, target_words),
-        temperature=temperature,
-        max_tokens=max_tokens,
-        log=log,
-        allow_plain=True,
-    )
-    narration = prepare_narration(str(data.get("narration") or ""))
-    summary = str(data.get("summary") or "").strip()
-    if count_words(narration) < int(target_words * 0.55):
-        log("info", f"Глава {chapter.get('index')} короче плана, модель дополняет её")
-        expanded = _complete_json(
+    number = chapter.get("index")
+    floor = max(30, int(target_words * 0.85))
+    narration = ""
+    summary = ""
+    prompt = chapter_prompt(settings, story, chapter, previous, target_words)
+    for attempt in range(3):
+        data = _complete_json(
             llm,
             system=SYSTEM,
-            user=continue_prompt(chapter, narration, target_words, language_line),
+            user=prompt,
             temperature=temperature,
             max_tokens=max_tokens,
             log=log,
             allow_plain=True,
+            required=("narration",),
         )
-        longer = prepare_narration(str(expanded.get("narration") or ""))
-        if count_words(longer) > count_words(narration):
-            narration = longer
-            summary = str(expanded.get("summary") or summary).strip()
+        candidate = drop_repeated_sentences(prepare_narration(str(data.get("narration") or "")))
+        if count_words(candidate) > count_words(narration):
+            narration = candidate
+            summary = str(data.get("summary") or summary).strip()
+        words = count_words(narration)
+        log("info", f"Глава {number}: {words} слов при плане около {target_words}")
+        if words >= floor:
+            return narration, summary
+        log("info", f"Глава {number} короче плана, модель дополняет её")
+        prompt = continue_prompt(chapter, narration, target_words, language_line)
     if count_words(narration) < 30:
-        raise ProviderError(f"Глава {chapter.get('index')} не получила текст")
+        raise ProviderError(f"Глава {number} не получила текст")
+    log("warning", f"Глава {number} осталась короче плана: {count_words(narration)} слов из {target_words}")
     return narration, summary
 
 
@@ -384,44 +399,69 @@ def _complete_json(
     max_tokens: int,
     log: Log,
     allow_plain: bool = False,
+    required: tuple[str, ...] = (),
 ) -> dict:
-    result = llm.complete(
-        system=system,
-        user=user,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        json_mode=True,
-    )
-    parsed = _parse_model_json(result.text, allow_plain=allow_plain)
-    if parsed is not None:
-        return parsed
-    if not getattr(llm, "retries_immediately", lambda: True)():
+    immediate = bool(getattr(llm, "retries_immediately", lambda: True)())
+    attempts = 3 if immediate else 1
+    prompt = user
+    last_error = "ответ не является JSON-объектом"
+    for attempt in range(1, attempts + 1):
+        result = llm.complete(
+            system=system,
+            user=prompt,
+            temperature=0.1 if attempt > 1 else temperature,
+            max_tokens=max_tokens,
+            json_mode=True,
+        )
+        parsed, error = _parse_model_json(result.text, allow_plain=allow_plain, required=required)
+        if parsed is not None:
+            if attempt > 1:
+                log("info", f"JSON принят с попытки {attempt}. Ошибка прошлого ответа: {error or last_error}")
+            return parsed
+        last_error = error or last_error
+        log("warning", f"Ответ модели был не JSON, попытка {attempt} из {attempts}: {last_error}")
+        if attempt == attempts:
+            break
+        if not immediate:
+            break
+        prompt = (
+            "TASK: json_repair\n"
+            "Return one valid JSON object only, no markdown.\n"
+            f"Parser error: {last_error}\n"
+            "Required fields: "
+            + ", ".join(required or ("a JSON object",))
+            + "\n"
+            + result.text[:12000]
+        )
+    if not immediate:
         raise ProviderError(
             "Модель не вернула пригодный JSON. Повтор сразу пропущен, чтобы не ждать 46 секунд. "
             "Для истории без этой паузы выберите Grok и вставьте ключ с console.x.ai."
         )
-    log("warning", "Ответ модели был не JSON, повторяю запрос")
-    repaired = llm.complete(
-        system=system,
-        user="TASK: json_repair\nReturn one valid JSON object only, no markdown.\n" + result.text[:12000],
-        temperature=0.1,
-        max_tokens=max_tokens,
-        json_mode=True,
-    )
-    parsed = _parse_model_json(repaired.text, allow_plain=allow_plain)
-    if parsed is not None:
-        return parsed
-    raise ProviderError("Модель не вернула пригодный JSON")
+    raise ProviderError(f"Модель не вернула пригодный JSON: {last_error}")
 
 
-def _parse_model_json(text: str, *, allow_plain: bool) -> dict | None:
+def _parse_model_json(
+    text: str,
+    *,
+    allow_plain: bool,
+    required: tuple[str, ...] = (),
+) -> tuple[dict | None, str]:
     try:
-        return extract_json(text)
-    except (ValueError, json.JSONDecodeError):
-        pass
-    if not allow_plain:
-        return None
-    prose = prepare_narration(text)
-    if count_words(prose) < 30 or "{" in prose:
-        return None
-    return {"narration": prose, "summary": "", "changed": True}
+        data = extract_json(text)
+    except (ValueError, json.JSONDecodeError) as exc:
+        data = None
+        error = str(exc)
+    else:
+        error = ""
+    if data is None and allow_plain:
+        prose = prepare_narration(text)
+        if count_words(prose) >= 30 and "{" not in prose:
+            data = {"narration": prose, "summary": "", "changed": True}
+            error = ""
+    if data is None:
+        return None, error or "ответ не является JSON-объектом"
+    missing = [key for key in required if not str(data.get(key) or "").strip()]
+    if missing:
+        return None, "нет полей: " + ", ".join(missing)
+    return data, error

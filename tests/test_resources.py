@@ -7,15 +7,15 @@ def setup_function():
     reset_for_tests(Reading(sensors_ok=False))
 
 
-def test_balanced_mode_keeps_two_projects_and_cpu_encode():
+def test_balanced_mode_keeps_two_projects_and_uses_nvenc_when_the_card_is_free():
     settings = VideoSettings()
     settings.cooling_mode = "balanced"
     settings.render_mode = "fast"
     settings.max_parallel_projects = 8
     settings.encoder = "auto"
     assert project_slots(settings) == 2
-    assert chunk_workers(settings) == 1
-    assert allow_nvenc(settings) is False
+    assert chunk_workers(settings) == (2 if cpu_count() >= 4 else 1)
+    assert allow_nvenc(settings) is True
 
 
 def test_low_resource_runs_one_project_on_cpu():
@@ -37,7 +37,7 @@ def test_cool_mode_without_a_sensor_stays_conservative():
     settings.encoder = "auto"
     assert project_slots(settings) == 2
     assert chunk_workers(settings) == 1
-    assert allow_nvenc(settings) is False
+    assert allow_nvenc(settings) is True
 
 
 def test_cool_sensor_allows_more_work_and_nvenc():
@@ -48,7 +48,7 @@ def test_cool_sensor_allows_more_work_and_nvenc():
     settings.max_parallel_projects = 8
     settings.encoder = "auto"
     assert project_slots(settings) == 3
-    assert chunk_workers(settings) == min(10, cpu_count())
+    assert chunk_workers(settings) == (2 if cpu_count() >= 4 else 1)
     assert allow_nvenc(settings) is True
     settings.encoder = "libx264"
     reset_for_tests(Reading(cpu_temp_c=46, sensors_ok=True, cpu_percent=22))
@@ -61,7 +61,8 @@ def test_balanced_cool_machine_encodes_ten_fragments():
     settings.cooling_mode = "balanced"
     settings.render_mode = "fast"
     settings.encoder = "libx264"
-    assert chunk_workers(settings) == min(10, cpu_count())
+    assert chunk_workers(settings) == (2 if cpu_count() >= 8 else 1)
+    assert allow_nvenc(settings) is False
 
 
 def test_memory_check_does_not_crash():

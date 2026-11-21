@@ -99,6 +99,18 @@ def _hard_split(text: str, limit: int) -> list[str]:
     return pack_sentences(pieces, limit)
 
 
+def drop_repeated_sentences(text: str) -> str:
+    seen: set[str] = set()
+    kept: list[str] = []
+    for sentence in split_sentences(text):
+        key = " ".join(sentence.lower().split())
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        kept.append(sentence)
+    return " ".join(kept)
+
+
 def prepare_narration(text: str) -> str:
     cleaned = text.replace("\u00a0", " ")
     cleaned = re.sub(r"[*_#`>]+", "", cleaned)

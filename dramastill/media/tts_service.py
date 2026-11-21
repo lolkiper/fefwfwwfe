@@ -113,7 +113,14 @@ def build_plan(story: dict, settings: VoiceSettings) -> list[dict]:
             groups = [[chunk] for chunk in pack_sentences(sentences, limit)]
             gap = 70
         for group in groups:
-            plan.append({"kind": "speech", "index": speech_index, "text": " ".join(group)})
+            plan.append(
+                {
+                    "kind": "speech",
+                    "index": speech_index,
+                    "chapter": int(chapter.get("index") or chapter_number + 1),
+                    "text": " ".join(group),
+                }
+            )
             speech_index += 1
             if gap > 0:
                 plan.append({"kind": "silence", "ms": gap})
@@ -245,10 +252,35 @@ class ChapterAudioPrefetch:
 
 
 def speech_workers(settings: VoiceSettings) -> int:
-    chosen = int(settings.parallelism or 10)
-    if chosen <= 2:
-        chosen = 10
-    return max(1, min(10, chosen))
+    chosen = int(settings.parallelism or 4)
+    return max(1, min(4, chosen))
+
+
+def chapter_time_spans(plan: list[dict], speech_dir: Path, ffprobe: str) -> list[tuple[float, float, int]]:
+    """Начало и конец каждой главы на общей звуковой дорожке."""
+    clock = 0.0
+    bounds: dict[int, list[float]] = {}
+    order: list[int] = []
+    for item in plan:
+        if item.get("kind") == "speech":
+            chapter = int(item.get("chapter") or 1)
+            path = speech_dir / f"{int(item.get('index') or 0):05d}.mp3"
+            duration = 0.0
+            if path.exists():
+                try:
+                    duration = max(0.0, probe(ffprobe, path).duration)
+                except FFmpegError:
+                    duration = 0.0
+            if chapter not in bounds:
+                bounds[chapter] = [clock, clock]
+                order.append(chapter)
+            clock += duration
+            bounds[chapter][1] = clock
+        elif item.get("kind") == "silence":
+            clock += max(0, int(item.get("ms") or 0)) / 1000.0
+            if order:
+                bounds[order[-1]][1] = clock
+    return [(bounds[chapter][0], bounds[chapter][1], chapter) for chapter in order]
 
 
 def _synthesize_all(*, provider, settings, items, speech_dir, ffprobe, token, log, progress) -> None:

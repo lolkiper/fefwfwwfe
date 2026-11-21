@@ -108,7 +108,7 @@ def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
         voice = "голос: Edge Neural"
     else:
         voice = f"голос: {settings.voice.provider}"
-    return f"{story}; {picture}; {voice}. На проект по-прежнему одна картинка."
+    return f"{story}; {picture}; {voice}. На каждую главу своя картинка."
 
 
 def build_llm(settings: AppSettings, secrets: SecretStore):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import traceback
 from collections.abc import Callable
@@ -17,10 +18,10 @@ from dramastill.media.bookends import deliver_movie
 from dramastill.media.composer import render_movie
 from dramastill.media.ffmpeg_util import FFmpegError, probe, resolve_ffmpeg
 from dramastill.media.resources import chunk_workers, cooling_decision, project_slots
-from dramastill.media.image_service import ensure_image
+from dramastill.media.image_service import ensure_chapter_images
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
-from dramastill.media.tts_service import ChapterAudioPrefetch, ensure_narration_audio
+from dramastill.media.tts_service import ChapterAudioPrefetch, chapter_time_spans, ensure_narration_audio
 from dramastill.providers.factory import Providers, build_providers, describe_route
 from dramastill.story.service import ensure_metadata, ensure_story
 from dramastill.util import format_clock, now_iso, safe_filename
@@ -74,8 +75,8 @@ def run_project(
             "Скорость: "
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
             f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
-            "Главы, проверка и озвучка идут до 10 одновременно. "
-            "Картинка двигается через scale и crop, без zoompan. "
+            "Главы и проверка идут до 4 одновременно, озвучка до 4. "
+            "На каждую главу своя картинка. Движение через scale и crop, без zoompan. "
             "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
         story_path = work / "story.json"
@@ -123,7 +124,7 @@ def run_project(
             callbacks.title(title)
 
         progress(0.24, "prepare")
-        image, audio, metadata = _prepare_media(
+        images, audio, metadata = _prepare_media(
             settings=settings,
             story=story,
             active=active,
@@ -167,7 +168,7 @@ def run_project(
             final = render_movie(
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
-                image=image,
+                image=images[0],
                 audio=audio,
                 particles=particles,
                 bands=bands,
@@ -176,6 +177,7 @@ def run_project(
                 token=token,
                 log=log,
                 progress=lambda fraction: progress(0.66 + 0.28 * fraction, "render"),
+                chapter_spans=_chapter_spans(work, ffprobe, story, images, audio_info.duration, log),
             )
         else:
             log("info", "Готовое видео уже собрано, повторная сборка не нужна")
@@ -190,7 +192,7 @@ def run_project(
         )
         progress(0.95, "publish")
         thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or title
-        thumbnail = compose_thumbnail(image, thumb_text, work / "thumbnail.jpg")
+        thumbnail = compose_thumbnail(images[0], thumb_text, work / "thumbnail.jpg")
         output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
         if settings.video.cleanup_temp:
             _cleanup(work, log)
@@ -233,12 +235,11 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
     def do_image():
         token.check()
         progress(0.26, "image")
-        return ensure_image(
+        return ensure_chapter_images(
             story=story,
             settings=settings.image,
             provider=active.image,
-            dest=work / "image.png",
-            prompt_path=work / "image_prompt.txt",
+            directory=work / "images",
             log=log,
         )
 
@@ -284,6 +285,28 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
             token.request("cancel")
             raise
     return results["image"], results["audio"], results["meta"]
+
+
+def _chapter_spans(work: Path, ffprobe: str, story: dict, images: list[Path], duration: float, log) -> list[tuple[float, float, Path]]:
+    chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
+    by_number: dict[int, Path] = {}
+    for offset, (chapter, path) in enumerate(zip(chapters, images), start=1):
+        by_number[int(chapter.get("index") or offset)] = path
+    plan_path = work / "audio" / "plan.json"
+    spans: list[tuple[float, float, Path]] = []
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            plan = []
+        if isinstance(plan, list):
+            for start, end, number in chapter_time_spans(plan, work / "audio" / "speech", ffprobe):
+                spans.append((start, end, by_number.get(number) or images[0]))
+    if not spans:
+        step = duration / max(1, len(images))
+        spans = [(index * step, (index + 1) * step, path) for index, path in enumerate(images)]
+    log("info", f"Видео получает {len(spans)} разных кадров, по одному на отрезок истории")
+    return spans
 
 
 def _mode_label(mode: str) -> str:

@@ -121,7 +121,7 @@ class MainWindow(QMainWindow):
         logo = QLabel("DramaStill")
         logo.setObjectName("logo")
         side.addWidget(logo)
-        subtitle = QLabel("Одна картина. Вся история.")
+        subtitle = QLabel("Своя картина у каждой главы.")
         subtitle.setObjectName("subtitle")
         subtitle.setWordWrap(True)
         side.addWidget(subtitle)
@@ -595,7 +595,7 @@ class MainWindow(QMainWindow):
             layout,
             "API и ключи",
             "Без ключа история идёт через бесплатный маршрут: между запросами пауза около 46 секунд. "
-            "Tokenlavka и Grok убирают эту паузу. Картинку по-прежнему рисует FLUX.1 Schnell.",
+            "Tokenlavka и Grok убирают эту паузу. На каждую главу FLUX рисует свой кадр.",
         )
         self.llm_key = QLineEdit(self.secrets.get("llm"))
         self.llm_key.setEchoMode(QLineEdit.Password)

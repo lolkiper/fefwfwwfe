@@ -22,6 +22,33 @@ from dramastill.media.visualizer import BarRenderer, parse_color
 from dramastill.util import concat_path, even
 
 
+def _chapter_slices(
+    total_frames: int,
+    fps: int,
+    chunk_seconds: int,
+    spans: list[tuple[float, float, Path]],
+    fallback: Path,
+) -> list[tuple[int, int, Path]]:
+    usable = [(start, end, path) for start, end, path in spans if end > start and path is not None]
+    if not usable:
+        return [(start, count, fallback) for start, count in frame_slices(total_frames, fps, chunk_seconds)]
+    pieces: list[tuple[int, int, Path]] = []
+    cursor = 0
+    for index, (_start, end, path) in enumerate(usable):
+        if index == len(usable) - 1:
+            end_frame = total_frames
+        else:
+            end_frame = max(cursor, min(total_frames, int(round(end * fps))))
+        if end_frame <= cursor:
+            continue
+        for offset, count in frame_slices(end_frame - cursor, fps, chunk_seconds):
+            pieces.append((cursor + offset, count, path))
+        cursor = end_frame
+    if cursor < total_frames:
+        pieces.append((cursor, total_frames - cursor, usable[-1][2]))
+    return pieces
+
+
 def frame_slices(total_frames: int, fps: int, chunk_seconds: int) -> list[tuple[int, int]]:
     size = max(1, int(chunk_seconds * fps))
     slices = []
@@ -46,6 +73,7 @@ def render_movie(
     token: CancelToken,
     log,
     progress,
+    chapter_spans: list[tuple[float, float, Path]] | None = None,
 ) -> Path:
     info = probe(ffprobe, audio)
     if info.duration <= 0.2:
@@ -56,7 +84,13 @@ def render_movie(
     audio_dir = work_dir / "audio" / "slices"
     chunks_dir.mkdir(parents=True, exist_ok=True)
     audio_dir.mkdir(parents=True, exist_ok=True)
-    slices = frame_slices(total_frames, fps, max(5, int(settings.chunk_seconds)))
+    slices = _chapter_slices(
+        total_frames,
+        fps,
+        max(5, int(settings.chunk_seconds)),
+        chapter_spans or [],
+        image,
+    )
     manifest = chunks_dir / "manifest.json"
     signature = _movie_signature(
         settings=settings,
@@ -83,30 +117,40 @@ def render_movie(
     )
     cache: dict = {}
     paths: list[Path | None] = [None] * len(slices)
-    jobs: list[tuple[int, int, int, Path, float]] = []
-    for index, (start, count) in enumerate(slices):
+    jobs: list[tuple[int, int, int, Path, float, Path]] = []
+    for index, (start, count, still) in enumerate(slices):
         token.check()
         dest = chunks_dir / f"{index:05d}.mkv"
         expected = count / fps
         if reusable and _chunk_ready(ffprobe, dest, expected):
-            log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов")
+            log("info", f"Фрагмент {index + 1} из {len(slices)} уже готов, кадр {still.name}")
             paths[index] = dest
             continue
         slice_audio = audio_dir / f"{index:05d}.wav"
         _slice_audio(ffmpeg, audio, slice_audio, start / fps, expected)
-        jobs.append((index, start, count, dest, expected))
+        jobs.append((index, start, count, dest, expected, still))
     done = len(slices) - len(jobs)
     if slices:
         progress(done / len(slices))
     workers = 1 if len(jobs) <= 1 else chunk_workers(settings)
     threads = encode_threads(settings, workers)
     if jobs:
-        log("info", f"Сборка фрагментов: {len(jobs)}, одновременно {workers}, потоков кодирования на фрагмент {threads}")
+        from dramastill.media.resources import allow_nvenc
 
-    def _job(item: tuple[int, int, int, Path, float]) -> int:
-        index, start, count, dest, expected = item
+        if allow_nvenc(settings):
+            log(
+                "info",
+                "Кодирование: NVIDIA NVENC. Плавный масштаб и crop остаются на процессоре, "
+                "потому что у покадрового движения нет фильтра CUDA.",
+            )
+        else:
+            log("info", "Кодирование фрагментов на процессоре")
+        log("info", f"Сборка фрагментов: {len(jobs)}, одновременно {workers}, потоков фильтра на фрагмент {threads}")
+
+    def _job(item: tuple[int, int, int, Path, float, Path]) -> int:
+        index, start, count, dest, expected, still = item
         token.check()
-        log("info", f"Собирается фрагмент {index + 1} из {len(slices)}")
+        log("info", f"Собирается фрагмент {index + 1} из {len(slices)}, кадр {still.name}")
         partial = dest.with_suffix(".partial.mkv")
         if partial.exists():
             partial.unlink()
@@ -114,7 +158,7 @@ def render_movie(
         try:
             _render_chunk(
                 ffmpeg=ffmpeg,
-                image=image,
+                image=still,
                 audio=slice_audio,
                 particles=particles,
                 bands=None if bands is None else bands[start : start + count],
@@ -420,7 +464,10 @@ def _movie_signature(
         "height": even(settings.height),
         "fps": fps,
         "frames": total_frames,
-        "slices": [[int(start), int(count)] for start, count in slices],
+        "slices": [
+            [int(item[0]), int(item[1]), str(item[2])] if len(item) > 2 else [int(item[0]), int(item[1])]
+            for item in slices
+        ],
         "bitrate": settings.video_bitrate,
         "audio_bitrate": settings.audio_bitrate,
         "encoder": settings.encoder,

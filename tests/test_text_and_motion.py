@@ -90,7 +90,16 @@ def test_chapters_are_written_ten_wide_and_a_bad_check_keeps_the_text(tmp_path):
     from dramastill.providers.base import LLMResult
     from dramastill.story.service import ensure_story
 
-    narration = " ".join(["Марина открыла сейф и увидела чужое имя."] * 8)
+    narration = " ".join(
+        [
+            "Марина открыла сейф и увидела чужое имя.",
+            "Бумага была сложена вдвое и пахла пылью.",
+            "Она узнала дату, которой не было в рассказах семьи.",
+            "Ключ остался в ладони, пока лампа качалась над столом.",
+            "Она не отдала бумагу, пока не сверила каждое слово.",
+            "За окном была ночь, и дом слушал их молча.",
+        ]
+    )
     current = {"open": 0, "most": 0}
     gate = __import__("threading").Lock()
 
@@ -126,7 +135,8 @@ def test_chapters_are_written_ten_wide_and_a_bad_check_keeps_the_text(tmp_path):
     path.write_text(__import__("json").dumps(story, ensure_ascii=False), encoding="utf-8")
     settings = StorySettings()
     settings.consistency_check = True
-    settings.duration_minutes = 4
+    settings.duration_minutes = 1
+    settings.words_per_minute = 20
     settings.chapters = 4
     result = ensure_story(
         settings=settings,
@@ -143,6 +153,30 @@ def test_chapters_are_written_ten_wide_and_a_bad_check_keeps_the_text(tmp_path):
     assert all((chapter.get("narration") or "").strip() for chapter in result["chapters"])
     assert result["chapters"][1]["consistency_done"] is True
     assert "Марина" in result["narration"]
+
+
+def test_repeated_sentences_are_removed_once():
+    from dramastill.story.textutil import drop_repeated_sentences
+
+    text = "Марина открыла сейф. Марина открыла сейф. Она прочитала имя."
+    cleaned = drop_repeated_sentences(text)
+    assert cleaned.count("сейф") == 1
+    assert "имя" in cleaned
+
+
+def test_chapter_slices_do_not_share_one_frame_range():
+    from pathlib import Path
+
+    from dramastill.media.composer import _chapter_slices
+
+    first = Path("a.png")
+    second = Path("b.png")
+    slices = _chapter_slices(100, 10, 3, [(0.0, 4.0, first), (4.0, 10.0, second)], first)
+    assert slices[0][2] == first
+    assert slices[-1][2] == second
+    covered = sum(count for _start, count, _path in slices)
+    assert covered == 100
+    assert slices[0][0] == 0
 
 
 def test_sentences_pack_without_losing_words():
