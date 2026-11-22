@@ -226,10 +226,18 @@ async function main() {
   check(ariaArgs.includes('--downloader') && ariaArgs.includes('aria2c'), 'при наличии aria2c качаем им, как Media Downloader');
   check(ariaArgs.includes('dash,m3u8:native'), 'HLS/DASH остаются на нативном клиенте yt-dlp');
   check(
-    ariaArgs.includes('--downloader-args') && String(ARIA2_DOWNLOADER_ARGS).includes('-x 8') && String(ARIA2_DOWNLOADER_ARGS).includes('--connect-timeout=8'),
-    'aria2c: 8 соединений и connect 8с, а не один коннект на 60с к мёртвой ноде',
+    ariaArgs.includes('--downloader-args') && String(ARIA2_DOWNLOADER_ARGS).includes('-x 4') && String(ARIA2_DOWNLOADER_ARGS).includes('--connect-timeout=8'),
+    'aria2c: 4 соединения и connect 8с, а не один коннект на 60с к мёртвой ноде',
     ARIA2_DOWNLOADER_ARGS
   );
+  const heavyArgs = buildYtDlpDownloadArgs({
+    url: 'https://www.youtube.com/watch?v=AAAAAAAAAAA',
+    template: path.join(ROOT, '1_AAAAAAAAAAA.%(ext)s'),
+    format: FALLBACK_FORMAT,
+    aria2cPath: path.join(ROOT, 'aria2c.exe'),
+    concurrency: 20
+  });
+  check(String(heavyArgs[heavyArgs.indexOf('--downloader-args') + 1]).includes('-x 2'), 'при 20 видео у каждого остаётся 2 соединения aria2c');
   check(buildAria2cDownloaderArgs(null).length === 0, 'без aria2c не подсовываем --downloader');
   const ariaProgress = parseProgressLine('[#2f4e1b 4.2MiB/32MiB(13%) CN:8 DL:1.2MiB ETA:23s]');
   check(ariaProgress && ariaProgress.percent === 13 && ariaProgress.speed.includes('1.2'), 'прогресс aria2c разбирается');

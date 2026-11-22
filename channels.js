@@ -18,7 +18,13 @@ const {
   extractVideoId,
   killProcessTree,
   resolveYtDlpPath,
-  ytdlpExists
+  ytdlpExists,
+  isBotCheckError,
+  isCookieError,
+  cookieBrowserCandidates,
+  shortYtError,
+  easeChildProcess,
+  YOUTUBE_EXTRACTOR_ARGS
 } = require('./downloader');
 
 const LINKS_FILE = 'Links.txt';
@@ -30,8 +36,11 @@ const MAX_CHANNELS = 200;
 const MAX_VIDEO_COUNT = 50;
 const MAX_SINCE_VIDEOS = 400;
 const DEFAULT_VIDEO_COUNT = 1;
-const DEFAULT_CHANNEL_CONCURRENCY = 4;
+const DEFAULT_CHANNEL_CONCURRENCY = 2;
 const MAX_CHANNEL_CONCURRENCY = 6;
+const PROBE_CONCURRENCY = 2;
+/** Сколько роликов подряд старше даты нужно увидеть, чтобы остановить просмотр списка. */
+const OLD_STREAK_TO_STOP = 12;
 const HISTORY_VERSION = 1;
 
 function normalizeVideoCount(value) {
@@ -195,6 +204,26 @@ function appendNewLinks(file, urls) {
   fs.appendFileSync(file, `${prefix}${urls.join('\n')}\n`, 'utf8');
 }
 
+function durationSeconds(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  if (entry.duration != null && entry.duration !== '') {
+    const n = Number(entry.duration);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  const parts = String(entry.duration_string || '').trim().split(':').map((part) => Number(part));
+  if (parts.length >= 2 && parts.length <= 3 && parts.every((part) => Number.isFinite(part))) {
+    return parts.reduce((total, part) => total * 60 + part, 0);
+  }
+  return null;
+}
+
+/** Полный список Shorts канала: UC… → плейлист UUSH…. Вкладка /shorts часто отдаёт только первые ролики. */
+function shortsPlaylistUrl(channelId) {
+  const id = String(channelId || '');
+  if (!/^UC[A-Za-z0-9_-]{2,}$/.test(id)) return null;
+  return `https://www.youtube.com/playlist?list=UUSH${id.slice(2)}`;
+}
+
 function watchUrl(id) {
   return `https://www.youtube.com/watch?v=${id}`;
 }
@@ -206,12 +235,11 @@ function videosFromPlaylist(info, limit) {
     if (!entry || videos.length >= limit) return;
     const id = extractVideoId(entry.id) || extractVideoId(entry.url) || extractVideoId(entry.webpage_url);
     if (!id) return;
-    const duration = entry.duration == null || entry.duration === '' ? null : Number(entry.duration);
     videos.push({
       id,
       url: watchUrl(id),
       title: entry.title || '',
-      duration: Number.isFinite(duration) ? duration : null,
+      duration: durationSeconds(entry),
       uploadDate: uploadDateFrom(entry)
     });
   });
@@ -268,6 +296,9 @@ class ChannelCollector {
     this.running = false;
     this.children = new Set();
     this._lock = Promise.resolve();
+    this._probeActive = 0;
+    this._probeWaiters = [];
+    this.cookiesFromBrowser = null;
   }
 
   async locked(fn) {
@@ -330,6 +361,7 @@ class ChannelCollector {
         }
       });
       this.children.add(child);
+      easeChildProcess(child);
       let stdout = '';
       let stderr = '';
       let settled = false;
@@ -394,47 +426,136 @@ class ChannelCollector {
     };
   }
 
-  async listVideos(channelUrl) {
-    const limit = this.since ? MAX_SINCE_VIDEOS : this.count;
-    const { stdout } = await this.runYtDlp([
-      ...buildBaseYtDlpArgs({ ytdlpPath: this.ytdlpPath, playlist: true }),
+  async withProbeSlot(fn) {
+    while (this._probeActive >= PROBE_CONCURRENCY) {
+      await new Promise((resolve) => {
+        this._probeWaiters.push(resolve);
+      });
+      if (this.stopped) return undefined;
+    }
+    this._probeActive += 1;
+    try {
+      return await fn();
+    } finally {
+      this._probeActive -= 1;
+      const next = this._probeWaiters.shift();
+      if (next) next();
+    }
+  }
+
+  playlistArgs(url, limit, cookiesFromBrowser) {
+    return [
+      ...buildBaseYtDlpArgs({
+        ytdlpPath: this.ytdlpPath,
+        playlist: true,
+        cookiesFromBrowser,
+        extractorArgs: `${YOUTUBE_EXTRACTOR_ARGS};youtubetab:approximate_date`
+      }),
       '--flat-playlist',
       '--playlist-end',
       String(limit),
       '-J',
       '--no-warnings',
-      channelUrl
-    ]);
-    const info = this.parseInfo(stdout);
-    const videos = videosFromPlaylist(info, limit);
-    const selected = [];
-    let reachedOlder = false;
-    const width = Math.max(1, this.concurrency);
-    for (let offset = 0; offset < videos.length && !this.stopped && !reachedOlder; offset += width) {
-      const batch = videos.slice(offset, offset + width);
-      await Promise.all(batch.map(async (video) => {
-        if (this.stopped) return;
-        if (video.duration != null && (!this.since || video.uploadDate)) return;
-        const probed = await this.probeVideo(video.url);
-        if (video.duration == null) video.duration = probed.duration;
-        if (!video.uploadDate && probed.uploadDate) video.uploadDate = probed.uploadDate;
-        if (probed.title) video.title = probed.title;
-      }));
-      for (const video of batch) {
-        if (this.stopped) break;
-        if (this.since && video.uploadDate && video.uploadDate < this.since) {
-          reachedOlder = true;
-          break;
+      url
+    ];
+  }
+
+  async fetchPlaylist(url, limit) {
+    const attempt = async (cookiesFromBrowser) => {
+      const { stdout } = await this.runYtDlp(this.playlistArgs(url, limit, cookiesFromBrowser));
+      return this.parseInfo(stdout);
+    };
+    const first = this.cookiesFromBrowser || null;
+    try {
+      return await attempt(first);
+    } catch (err) {
+      if ((err && err.cancelled) || this.stopped) throw err;
+      const message = (err && err.message) || '';
+      const retry = (!first && isBotCheckError(message)) || (first && (isBotCheckError(message) || isCookieError(message)));
+      if (!retry) throw err;
+      let lastError = err;
+      for (const name of cookieBrowserCandidates()) {
+        if (this.stopped) throw err;
+        if (name === first) continue;
+        try {
+          this.log('warn', `YouTube просит вход — повторяю список с cookies из ${name}`);
+          const info = await attempt(name);
+          this.cookiesFromBrowser = name;
+          return info;
+        } catch (nextErr) {
+          if ((nextErr && nextErr.cancelled) || this.stopped) throw nextErr;
+          lastError = nextErr;
+          if (isBotCheckError(nextErr && nextErr.message) || isCookieError(nextErr && nextErr.message)) continue;
+          throw nextErr;
         }
-        selected.push(video);
+      }
+      throw lastError;
+    }
+  }
+
+  async probeMissing(videos) {
+    const pending = videos.filter((video) => video.duration == null);
+    for (let offset = 0; offset < pending.length && !this.stopped; offset += PROBE_CONCURRENCY) {
+      const batch = pending.slice(offset, offset + PROBE_CONCURRENCY);
+      await Promise.all(batch.map((video) => this.withProbeSlot(async () => {
+        if (this.stopped || video.duration != null) return;
+        try {
+          const probed = await this.probeVideo(video.url);
+          if (video.duration == null) video.duration = probed.duration;
+          if (!video.uploadDate && probed.uploadDate) video.uploadDate = probed.uploadDate;
+          if (probed.title) video.title = probed.title;
+        } catch (err) {
+          if ((err && err.cancelled) || this.stopped) throw err;
+        }
+      })));
+    }
+  }
+
+  async listVideos(channelUrl) {
+    const limit = this.since ? MAX_SINCE_VIDEOS : this.count;
+    const info = await this.fetchPlaylist(channelUrl, limit);
+    let videos = videosFromPlaylist(info, limit);
+    if (this.since && videos.length < limit) {
+      const playlistUrl = shortsPlaylistUrl(channelKeyFrom(info, ''));
+      if (playlistUrl) {
+        try {
+          const fullInfo = await this.fetchPlaylist(playlistUrl, limit);
+          const fullVideos = videosFromPlaylist(fullInfo, limit);
+          if (fullVideos.length > videos.length) videos = fullVideos;
+        } catch (err) {
+          if ((err && err.cancelled) || this.stopped) throw err;
+          this.log('warn', `Полный список Shorts не открылся, беру вкладку канала: ${shortYtError(err && err.message)}`);
+        }
       }
     }
+    const selected = [];
+    let reachedOlder = false;
+    let oldStreak = 0;
+    videos.forEach((video) => {
+      if (this.stopped || reachedOlder) return;
+      if (this.since && video.uploadDate && video.uploadDate < this.since) {
+        oldStreak += 1;
+        if (oldStreak >= OLD_STREAK_TO_STOP) reachedOlder = true;
+        return;
+      }
+      oldStreak = 0;
+      selected.push(video);
+    });
+    if (oldStreak > 0) reachedOlder = true;
     if (this.since && !reachedOlder && videos.length >= limit) {
       this.log(
         'warn',
         `С ${formatSinceDate(this.since)} взяты первые ${limit} роликов, более старые не проверялись: ${channelUrl}`
       );
     }
+    await this.probeMissing(selected);
+    if (this.since) {
+      for (let index = selected.length - 1; index >= 0; index -= 1) {
+        const video = selected[index];
+        if (video.uploadDate && video.uploadDate < this.since) selected.splice(index, 1);
+      }
+    }
+    this.log('info', `Shorts в списке: ${videos.length}, с выбранного окна: ${selected.length}: ${channelUrl}`);
     return { key: channelKeyFrom(info, channelUrl), videos: selected, reachedOlder };
   }
 
@@ -538,14 +659,15 @@ class ChannelCollector {
               record.updatedAt = new Date().toISOString();
               history.channels[key] = record;
               writeHistory(historyPath, history);
-              if (!freshLinks.length && decision.tooShort) {
+              if (!freshLinks.length && decision.tooShort && !decision.tooLong) {
                 this.log('info', `Новые Shorts короче ${this.minSeconds} с — ссылка не записана: ${channelUrl}`);
-              }
-              if (!freshLinks.length && decision.tooLong) {
+              } else if (!freshLinks.length && decision.tooLong && !decision.tooShort) {
                 this.log('info', `Новые ролики длиннее ${durationLimitLabel(this.maxSeconds)} — ссылка не записана: ${channelUrl}`);
-              } else if (!freshLinks.length && decision.unknown && !decision.tooShort) {
+              } else if (!freshLinks.length && decision.tooShort && decision.tooLong) {
+                this.log('info', `Новые Shorts короче ${this.minSeconds} с или длиннее ${durationLimitLabel(this.maxSeconds)} — ссылка не записана: ${channelUrl}`);
+              } else if (!freshLinks.length && decision.unknown) {
                 this.log('warn', `Длительность новых роликов неизвестна — ссылка не записана: ${channelUrl}`);
-              } else if (!freshLinks.length && !decision.tooShort && !decision.tooLong) {
+              } else if (!freshLinks.length) {
                 this.log('info', `Новых коротких роликов нет: ${channelUrl}`);
               }
               this.emit(summary);
@@ -592,6 +714,8 @@ module.exports = {
   MAX_SINCE_VIDEOS,
   DEFAULT_VIDEO_COUNT,
   DEFAULT_CHANNEL_CONCURRENCY,
+  PROBE_CONCURRENCY,
+  shortsPlaylistUrl,
   normalizeVideoCount,
   normalizeChannelConcurrency,
   normalizeSinceDate,

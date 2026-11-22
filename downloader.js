@@ -20,9 +20,9 @@ const { spawn, execFile, execFileSync } = require('child_process');
 const MAX_CONCURRENT_DOWNLOADS = 1;
 /** Сколько видео очередь качает одновременно. Каждое — отдельный yt-dlp. */
 const MAX_PARALLEL_DOWNLOADS = 20;
-const DEFAULT_PARALLEL_DOWNLOADS = 20;
+const DEFAULT_PARALLEL_DOWNLOADS = 6;
 /** Фрагменты DASH/HLS, которые yt-dlp качает сам (без aria2c). */
-const CONCURRENT_FRAGMENTS = 4;
+const CONCURRENT_FRAGMENTS = 2;
 const QUEUE_FILE = 'download_queue.json';
 const TITLES_FILE = 'nazvaniya.txt';
 const LOG_FILE = 'download_log.txt';
@@ -41,10 +41,10 @@ const HTTP_CHUNK_SIZE = '10M';
 const FALLBACK_FORMAT = 'bv*+ba/bv*+ba*/b';
 /** Сначала разрешение и fps, и только при равенстве — h264/AAC. */
 const QUALITY_SORT = 'res,fps,vbr,abr,vcodec:h264,acodec:aac';
-/** Как yt-dlp-aria2c в Media Downloader: много соединений, короткий connect, докачка. */
+/** Как yt-dlp-aria2c в Media Downloader: несколько соединений, короткий connect, докачка. */
 const ARIA2_DOWNLOADER_ARGS = [
-  '-x 8',
-  '-s 8',
+  '-x 4',
+  '-s 4',
   '-k 1M',
   '--file-allocation=none',
   '--min-split-size=1M',
@@ -190,7 +190,7 @@ function resolveAria2cPath(ytdlpPath) {
   ]);
 }
 
-function buildAria2cDownloaderArgs(aria2cPath) {
+function buildAria2cDownloaderArgs(aria2cPath, concurrency) {
   if (!aria2cPath) return [];
   return [
     '--downloader',
@@ -198,7 +198,7 @@ function buildAria2cDownloaderArgs(aria2cPath) {
     '--downloader',
     'dash,m3u8:native',
     '--downloader-args',
-    `aria2c:${ARIA2_DOWNLOADER_ARGS}`
+    `aria2c:${aria2ArgsForConcurrency(concurrency)}`
   ];
 }
 
@@ -253,7 +253,33 @@ function shortYtError(message) {
   return line.length > 240 ? `${line.slice(0, 237)}...` : line;
 }
 
-function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, playlist } = {}) {
+function connectionsForConcurrency(concurrency) {
+  const n = Math.max(1, Math.round(Number(concurrency) || 1));
+  if (n >= 12) return 2;
+  if (n >= 6) return 4;
+  return 8;
+}
+
+function aria2ArgsForConcurrency(concurrency) {
+  const connections = connectionsForConcurrency(concurrency);
+  return ARIA2_DOWNLOADER_ARGS
+    .replace(/-x\s+\d+/, `-x ${connections}`)
+    .replace(/-s\s+\d+/, `-s ${connections}`);
+}
+
+/** Снижает приоритет дочернего yt-dlp/ffmpeg, чтобы рабочий стол оставался отзывчивым. */
+function easeChildProcess(child) {
+  if (!child || !child.pid) return;
+  try {
+    const priority = os.constants && os.constants.priority && os.constants.priority.PRIORITY_BELOW_NORMAL;
+    if (priority == null) return;
+    os.setPriority(child.pid, priority);
+  } catch {
+    /* приоритет необязателен */
+  }
+}
+
+function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, playlist, extractorArgs } = {}) {
   const args = [
     '--ignore-config',
     playlist ? '--yes-playlist' : '--no-playlist',
@@ -265,7 +291,7 @@ function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, playlist } = {}) {
     '--extractor-retries',
     '2',
     '--extractor-args',
-    YOUTUBE_EXTRACTOR_ARGS,
+    extractorArgs || YOUTUBE_EXTRACTOR_ARGS,
     ...resolveJsRuntimeArgs(ytdlpPath)
   ];
   if (cookiesFromBrowser) args.push('--cookies-from-browser', cookiesFromBrowser);
@@ -781,12 +807,13 @@ function buildYtDlpDownloadArgs({
   preferMp4,
   ytdlpPath,
   cookiesFromBrowser,
-  aria2cPath
+  aria2cPath,
+  concurrency
 }) {
   const aria = aria2cPath || resolveAria2cPath(ytdlpPath);
   const args = [
     ...buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser }),
-    ...buildAria2cDownloaderArgs(aria),
+    ...buildAria2cDownloaderArgs(aria, concurrency),
     '--newline',
     '--progress',
     '--no-quiet',
@@ -1390,6 +1417,7 @@ class DownloadQueue {
         }
       });
       this.children.add(child);
+      easeChildProcess(child);
       let stdout = '';
       let stderr = '';
       let leftover = '';
@@ -1854,7 +1882,8 @@ class DownloadQueue {
       preferMp4: true,
       ytdlpPath: this.ytdlpPath,
       cookiesFromBrowser,
-      aria2cPath: resolveAria2cPath(this.ytdlpPath)
+      aria2cPath: resolveAria2cPath(this.ytdlpPath),
+      concurrency: this.concurrency
     });
 
     this.log('info', `#${item.number} DOWNLOAD START`);
@@ -2299,6 +2328,9 @@ module.exports = {
   setYtDlpOverride,
   HTTP_CHUNK_SIZE,
   ARIA2_DOWNLOADER_ARGS,
+  connectionsForConcurrency,
+  aria2ArgsForConcurrency,
+  easeChildProcess,
   mergeUrlsIntoQueue,
   loadQueueFile,
   resolveYtDlpPath,

@@ -427,15 +427,16 @@
                 <option value="3">3 потока</option>
                 <option value="4">4 потока</option>
                 <option value="5">5 потоков</option>
-                <option value="6">6 потоков</option>
+                <option value="6" selected>6 потоков</option>
                 <option value="8">8 потоков</option>
                 <option value="10">10 потоков</option>
                 <option value="12">12 потоков</option>
                 <option value="16">16 потоков</option>
-                <option value="20" selected>20 потоков</option>
+                <option value="20">20 потоков</option>
               </select>
               <p class="field__note">
-                Одновременно качается до 20 видео, каждое своим процессом. Если ссылка не скачалась со второй попытки, она пропускается.
+                Одновременно качается до 20 видео, каждое своим процессом. По умолчанию 6: очередь идёт быстрее одного потока и не занимает весь процессор.
+                Если ссылка не скачалась со второй попытки, она пропускается.
                 Кнопка «Стоп» сразу обрывает yt-dlp и отменяет все повторы.
               </p>
             </div>
@@ -736,15 +737,15 @@
               <label for="ch-parallel">Сколько каналов проверять одновременно</label>
               <select id="ch-parallel">
                 <option value="1">1 — по одному</option>
-                <option value="2">2 потока</option>
+                <option value="2" selected>2 потока</option>
                 <option value="3">3 потока</option>
-                <option value="4" selected>4 потока</option>
+                <option value="4">4 потока</option>
                 <option value="5">5 потоков</option>
                 <option value="6">6 потоков</option>
               </select>
               <p class="field__note">
-                Несколько каналов проверяются сразу, поэтому список ссылок собирается быстрее.
-                Уже виденные Shorts запоминаются: если новых нет, канал пропускается.
+                Несколько каналов проверяются сразу. Для каждого канала берётся полный список Shorts, а не первые несколько роликов вкладки.
+                Длительность, которой нет в списке, проверяется по два ролика, чтобы не загружать компьютер.
               </p>
             </div>
           </article>

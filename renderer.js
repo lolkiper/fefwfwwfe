@@ -552,7 +552,7 @@ function collectSettings() {
     verbose: el.verbose.checked,
     downloadDir: el.dlDir.value.trim(),
     downloadLinks: el.dlLinks.value,
-    downloadParallel: el.dlParallel ? Number(el.dlParallel.value) : 20,
+    downloadParallel: el.dlParallel ? Number(el.dlParallel.value) : 6,
     downloadAudioLang: el.dlAudioLang ? el.dlAudioLang.value : 'auto',
     downloadAudioLangOther: el.dlAudioLangOther ? el.dlAudioLangOther.value.trim() : '',
     downloadAudioDetect: el.dlAudioDetect ? el.dlAudioDetect.checked : false,
@@ -701,9 +701,9 @@ function restoreSettings() {
   if (saved.downloadDir) el.dlDir.value = saved.downloadDir;
   if (saved.downloadLinks) el.dlLinks.value = saved.downloadLinks;
   if (el.dlParallel && saved.downloadParallel) {
-    // 3 was the previous default. That saved value starts at 20 with this version.
+    // 3 was the 2.4.2 default, 20 was the 2.4.4 default. Both now start at 6.
     const savedParallel = Number(saved.downloadParallel);
-    const value = savedParallel === 3 ? '20' : String(saved.downloadParallel);
+    const value = savedParallel === 3 || savedParallel === 20 ? '6' : String(saved.downloadParallel);
     if (Array.from(el.dlParallel.options).some((option) => option.value === value)) el.dlParallel.value = value;
   }
   if (el.dlAudioLang && saved.downloadAudioLang) el.dlAudioLang.value = saved.downloadAudioLang;
@@ -734,7 +734,8 @@ function restoreSettings() {
     el.chSince.value = /^\d{4}-\d{2}-\d{2}$/.test(saved.channelSince || '') ? saved.channelSince : defaultSinceInput();
   }
   if (el.chParallel && Number.isFinite(Number(saved.channelParallel))) {
-    const parallel = String(Math.min(6, Math.max(1, Math.round(Number(saved.channelParallel)))));
+    const savedChannels = Number(saved.channelParallel);
+    const parallel = String(Math.min(6, Math.max(1, Math.round(savedChannels === 4 ? 2 : savedChannels))));
     if (Array.from(el.chParallel.options).some((option) => option.value === parallel)) el.chParallel.value = parallel;
   }
 }
@@ -1859,7 +1860,7 @@ function bindDownloadUi() {
       text,
       defaultAudioLang: currentDefaultAudioLang(),
       audioLangs: state.audioLangByNumber,
-      concurrency: el.dlParallel ? Number(el.dlParallel.value) : 20
+      concurrency: el.dlParallel ? Number(el.dlParallel.value) : 6
     });
     if (result && !result.ok && !result.reported) {
       setDownloadRunning(false, false);
@@ -2110,7 +2111,7 @@ function bindChannelsUi() {
       outputDir,
       text,
       since: el.chSince ? el.chSince.value : '',
-      concurrency: el.chParallel ? Number(el.chParallel.value) : 4
+      concurrency: el.chParallel ? Number(el.chParallel.value) : 2
     });
     if (result && !result.ok && !result.reported) {
       setChannelRunning(false);

@@ -198,7 +198,7 @@ function main() {
     fs.mkdirSync(sinceDir, { recursive: true });
     const day = (ymd) => Math.floor(Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1, Number(ymd.slice(6, 8)), 12) / 1000);
     let playlistEnd = null;
-    let requested = '';
+    const flatUrls = [];
     const sinceCollector = new ChannelCollector({
       outputDir: sinceDir,
       since: '2026-11-10',
@@ -207,10 +207,12 @@ function main() {
         if (args.includes('--flat-playlist')) {
           const endAt = args.indexOf('--playlist-end');
           playlistEnd = endAt >= 0 ? args[endAt + 1] : null;
-          requested = args[args.length - 1];
+          flatUrls.push(args[args.length - 1]);
         }
         return playlist('UCsince', [
           { id: 'NODATESHORT', duration: 40, title: 'short without date' },
+          { id: 'PINNEDOLD01', duration: 40, timestamp: day('20200101'), title: 'pinned old' },
+          { id: 'NOV12SHORT1', duration: 60, timestamp: day('20261112'), title: 'after pinned' },
           { id: 'NOV20SHORT1', duration: 140, timestamp: day('20261120'), title: '20 nov' },
           { id: 'NOV10EXACT1', duration: 150, timestamp: day('20261110'), title: '10 nov exact' },
           { id: 'NOV10TOOLNG', duration: 151, timestamp: day('20261110'), title: '10 nov long' },
@@ -220,12 +222,13 @@ function main() {
       }
     });
     const sinceSummary = await sinceCollector.run('@Since');
-    check(String(requested).endsWith('/@Since/shorts'), 'запрос идёт на вкладку Shorts', requested);
+    check(String(flatUrls[0] || '').endsWith('/@Since/shorts'), 'запрос идёт на вкладку Shorts', flatUrls.join(' | '));
+    check(flatUrls.some((url) => url.includes('list=UUSHsince')), 'после короткой вкладки открывается полный список Shorts', flatUrls.join(' | '));
     check(playlistEnd === String(MAX_SINCE_VIDEOS), 'с даты запрашивается окно роликов, а не одно последнее', playlistEnd);
-    check(sinceSummary.links === 3 && sinceSummary.tooLong === 1, 'с 10 ноября записаны Shorts до 150 с, более длинный нет', JSON.stringify(sinceSummary));
+    check(sinceSummary.links === 4 && sinceSummary.tooLong === 1, 'с 10 ноября записаны Shorts до 150 с, более длинный нет', JSON.stringify(sinceSummary));
     const sinceLines = fs.readFileSync(path.join(sinceDir, LINKS_FILE), 'utf8');
-    check(sinceLines.includes('NODATESHORT') && sinceLines.includes('NOV20SHORT1') && sinceLines.includes('NOV10EXACT1'), 'Shorts без даты, с даты и в сам день попали в Links.txt');
-    check(!sinceLines.includes('NOV09SHORT1') && !sinceLines.includes('NOV01SHORT1'), 'ролики раньше выбранной даты не записаны');
+    check(sinceLines.includes('NODATESHORT') && sinceLines.includes('NOV20SHORT1') && sinceLines.includes('NOV10EXACT1') && sinceLines.includes('NOV12SHORT1'), 'Shorts без даты, с даты и в сам день попали в Links.txt');
+    check(!sinceLines.includes('NOV09SHORT1') && !sinceLines.includes('NOV01SHORT1') && !sinceLines.includes('PINNEDOLD01'), 'ролики раньше выбранной даты не записаны');
     const sinceHistory = JSON.parse(fs.readFileSync(path.join(sinceDir, HISTORY_FILE), 'utf8'));
     check(sinceHistory.channels.UCsince.seen.includes('NOV10TOOLNG'), 'длинный ролик с этой даты запомнен');
     check(!sinceHistory.channels.UCsince.seen.includes('NOV09SHORT1'), 'ролик раньше даты не помечается просмотренным');
