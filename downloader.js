@@ -18,9 +18,9 @@ const { spawn, execFile, execFileSync } = require('child_process');
 
 /** Значение по умолчанию для библиотеки; приложение передаёт выбор из интерфейса. */
 const MAX_CONCURRENT_DOWNLOADS = 1;
-/** Больше 6 параллельных yt-dlp YouTube начинает отвечать 403/429. */
-const MAX_PARALLEL_DOWNLOADS = 6;
-const DEFAULT_PARALLEL_DOWNLOADS = 3;
+/** Сколько видео очередь качает одновременно. Каждое — отдельный yt-dlp. */
+const MAX_PARALLEL_DOWNLOADS = 20;
+const DEFAULT_PARALLEL_DOWNLOADS = 20;
 /** Фрагменты DASH/HLS, которые yt-dlp качает сам (без aria2c). */
 const CONCURRENT_FRAGMENTS = 4;
 const QUEUE_FILE = 'download_queue.json';

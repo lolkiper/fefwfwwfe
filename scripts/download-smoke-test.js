@@ -421,7 +421,7 @@ async function main() {
   check(skipTitles.includes('После проверки формата'), 'название взято из info.json после скачивания');
 
   console.log('\n6) Многопоточная загрузка…');
-  check(normalizeConcurrency(0) === 1 && normalizeConcurrency(99) === MAX_PARALLEL_DOWNLOADS, 'число потоков ограничено 1…6');
+  check(normalizeConcurrency(0) === 1 && normalizeConcurrency(20) === 20 && normalizeConcurrency(99) === MAX_PARALLEL_DOWNLOADS, 'число потоков ограничено 1…20');
   check(dlArgs.includes('--concurrent-fragments'), 'yt-dlp качает фрагменты DASH/HLS в несколько потоков');
   check(Math.round(parseSpeedBytes('8.40MiB/s') / 1024 / 1024 * 10) === 84, 'скорость yt-dlp разбирается для суммы');
   const parDir = path.join(ROOT, 'parallel');

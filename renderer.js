@@ -552,7 +552,7 @@ function collectSettings() {
     verbose: el.verbose.checked,
     downloadDir: el.dlDir.value.trim(),
     downloadLinks: el.dlLinks.value,
-    downloadParallel: el.dlParallel ? Number(el.dlParallel.value) : 3,
+    downloadParallel: el.dlParallel ? Number(el.dlParallel.value) : 20,
     downloadAudioLang: el.dlAudioLang ? el.dlAudioLang.value : 'auto',
     downloadAudioLangOther: el.dlAudioLangOther ? el.dlAudioLangOther.value.trim() : '',
     downloadAudioDetect: el.dlAudioDetect ? el.dlAudioDetect.checked : false,
@@ -701,7 +701,9 @@ function restoreSettings() {
   if (saved.downloadDir) el.dlDir.value = saved.downloadDir;
   if (saved.downloadLinks) el.dlLinks.value = saved.downloadLinks;
   if (el.dlParallel && saved.downloadParallel) {
-    const value = String(saved.downloadParallel);
+    // 3 was the previous default. That saved value starts at 20 with this version.
+    const savedParallel = Number(saved.downloadParallel);
+    const value = savedParallel === 3 ? '20' : String(saved.downloadParallel);
     if (Array.from(el.dlParallel.options).some((option) => option.value === value)) el.dlParallel.value = value;
   }
   if (el.dlAudioLang && saved.downloadAudioLang) el.dlAudioLang.value = saved.downloadAudioLang;
@@ -1857,7 +1859,7 @@ function bindDownloadUi() {
       text,
       defaultAudioLang: currentDefaultAudioLang(),
       audioLangs: state.audioLangByNumber,
-      concurrency: el.dlParallel ? Number(el.dlParallel.value) : 3
+      concurrency: el.dlParallel ? Number(el.dlParallel.value) : 20
     });
     if (result && !result.ok && !result.reported) {
       setDownloadRunning(false, false);
