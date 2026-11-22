@@ -192,9 +192,12 @@ def run_project(
             log=log,
         )
         progress(0.95, "publish")
-        thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or title
-        thumbnail = compose_thumbnail(images[0], thumb_text, work / "thumbnail.jpg")
-        output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
+        show_title = str((metadata.get("titles") or [title])[0] or title)
+        thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or show_title
+        still, chapter_no = _poster_still(story, images)
+        log("info", f"Превью собрано из кадра главы {chapter_no}: {show_title}")
+        thumbnail = compose_thumbnail(still, thumb_text, work / "thumbnail.jpg", lines=metadata.get("thumbnail_lines"))
+        output = _publish(settings, show_title, project_id, delivered, thumbnail, work / "youtube.json")
         if settings.video.cleanup_temp:
             _cleanup(work, log)
         _accumulate_elapsed(db, project_id)
@@ -205,8 +208,10 @@ def run_project(
             progress=1,
             output_path=str(output),
             error=None,
-            title=metadata["titles"][0],
+            title=show_title,
         )
+        if callbacks is not None:
+            callbacks.title(show_title)
         log("info", f"Видео сохранено: {output}")
         progress(1, "done")
         return output
@@ -311,6 +316,27 @@ def _chapter_spans(work: Path, ffprobe: str, story: dict, images: list[Path], du
         spans = [(index * step, (index + 1) * step, path) for index, path in enumerate(images)]
     log("info", f"Видео получает {len(spans)} разных кадров, по одному на отрезок истории")
     return spans
+
+
+def _poster_still(story: dict, images: list[Path]) -> tuple[Path, int]:
+    chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
+    best_score = 0
+    best_offset = 0
+    for offset, chapter in enumerate(chapters[: len(images)]):
+        purpose = str(chapter.get("purpose") or "").lower()
+        score = 1
+        if "turn" in purpose or "поворот" in purpose:
+            score = 4
+        elif "end" in purpose or "финал" in purpose:
+            score = 3
+        elif "escalat" in purpose or "кульмин" in purpose:
+            score = 2
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+    if best_score <= 1 and len(images) > 1:
+        best_offset = min(len(images) - 1, max(1, len(images) // 2))
+    return images[best_offset], best_offset + 1
 
 
 def _mode_label(mode: str) -> str:

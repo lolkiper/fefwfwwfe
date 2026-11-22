@@ -292,6 +292,8 @@ def test_metadata_failure_keeps_the_story_title(tmp_path):
     )
     assert data["titles"] == ["Сейф"]
     assert data["thumbnail_text"] == "СЕЙФ"
+    assert [item["tone"] for item in data["thumbnail_lines"]][0] == "yellow"
+    assert data["thumbnail_lines"][-1]["tone"] == "red"
     assert "завещания" in data["description"]
     assert any("Название собрано из истории" in message for _level, message in notes)
 

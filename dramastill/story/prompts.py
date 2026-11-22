@@ -25,7 +25,7 @@ User idea (optional): {idea_line}
 
 Invent an original story. Return one JSON object with this shape:
 {{
-  "title": "working title in the audience language, under 80 characters",
+  "title": "YouTube title in the audience language, 60 to 100 characters: the shocking act and what happened because of it, ending with ! or …",
   "theme": "short theme name in the audience language",
   "logline": "one sentence in the audience language",
   "narrative_voice": "first or third, and stay with it",
@@ -48,8 +48,8 @@ Invent an original story. Return one JSON object with this shape:
     }}
   ],
   "dramatic_moment": "ONE visual moment IN ENGLISH that can be a single 16:9 photograph. Name who is in the frame and what just happened. No collage.",
-  "thumbnail_text": "3 to 6 emotional words in the audience language",
-  "title_variants": ["three different YouTube titles in the audience language"]
+  "thumbnail_text": "the poster lines joined by spaces, audience language",
+  "title_variants": ["three more titles in the same concrete style, audience language"]
 }}
 
 Rules:
@@ -58,6 +58,7 @@ Rules:
 - The last chapter must contain a turn and a resolution.
 - Do not propose more than one photograph.
 - Keep names, ages, and relationships consistent.
+- The title names a relationship and a specific act from this story. No vague bait such as "you will not believe".
 """
 
 
@@ -156,10 +157,19 @@ Narration excerpt:
 
 Return JSON:
 {{
-  "titles": ["five different titles under 70 characters"],
+  "titles": [
+    "five different titles, each 70 to 100 characters, audience language"
+  ],
   "description": "two short paragraphs, compelling and honest, plus one line that the story is original fiction",
   "tags": ["12 to 20 tags without hash marks"],
-  "thumbnail_text": "3 to 6 emotional words"
+  "thumbnail_text": "the poster lines joined by spaces",
+  "thumbnail_lines": [
+    {{"text": "СВЕКРОВЬ", "tone": "yellow"}},
+    {{"text": "ПРОДАЛА ДОМ", "tone": "white"}},
+    {{"text": "НЕВЕСТКИ", "tone": "white"}},
+    {{"text": "ТАЙКОМ!", "tone": "red"}}
+  ]
 }}
-Do not claim the story is a true documentary.
+Title style: one concrete shock and its consequence. Name who did it and what they did, in the audience language. End with ! or …. Do not use "you will not believe" or claim a real documentary.
+Poster style: 4 or 5 short lines, 1 to 4 words each, readable on a phone. White is the setup, yellow is the hook, red is the single worst outcome. The example lines above are only the shape. Write new lines from THIS story, in the audience language, in capitals when the script has case.
 """

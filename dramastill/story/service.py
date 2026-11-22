@@ -8,6 +8,7 @@ from typing import Callable
 
 from dramastill.cancel import CancelToken
 from dramastill.config.defaults import StorySettings, language_instruction
+from dramastill.media.thumbnail import poster_lines
 from dramastill.providers.base import LLMProvider
 from dramastill.providers.errors import ProviderError
 from dramastill.story.prompts import (
@@ -254,10 +255,11 @@ def ensure_metadata(
             existing = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
             existing = {}
-        if existing.get("titles") and existing.get("description") and existing.get("thumbnail_text"):
+        lines = existing.get("thumbnail_lines")
+        if existing.get("titles") and existing.get("description") and isinstance(lines, list) and lines:
             return existing
     token.check()
-    log("info", "Модель пишет название, описание и теги")
+    log("info", "Модель пишет название и текст превью: жёлтый крючок и красная строка удара")
     try:
         data = _complete_json(
             llm,
@@ -280,18 +282,35 @@ def ensure_metadata(
 
 
 def _metadata_from(story: dict, data: dict) -> dict:
-    titles = [str(item).strip() for item in data.get("titles") or [] if str(item).strip()]
+    titles = [_fit_title(str(item)) for item in data.get("titles") or [] if str(item).strip()]
     if not titles and story.get("title"):
-        titles = [str(story["title"]).strip()]
+        titles = [_fit_title(str(story["title"]))]
     title = titles[0] if titles else "История"
     description = str(data.get("description") or story.get("logline") or story.get("theme") or title).strip()
     thumbnail = str(data.get("thumbnail_text") or story.get("thumbnail_text") or title).strip()
+    phrase = thumbnail or title
+    if len(phrase.split()) < 4:
+        phrase = " ".join(part for part in (phrase, str(story.get("logline") or "")) if part)
+    rows = poster_lines(phrase, data.get("thumbnail_lines") or story.get("thumbnail_lines"))
+    if not thumbnail:
+        thumbnail = " ".join(phrase for phrase, _tone in rows)
     return {
         "titles": (titles or [title])[:5],
         "description": description or title,
         "tags": [str(item).strip().lstrip("#") for item in data.get("tags") or [] if str(item).strip()],
         "thumbnail_text": thumbnail or title,
+        "thumbnail_lines": [{"text": phrase, "tone": tone} for phrase, tone in rows],
     }
+
+
+def _fit_title(text: str) -> str:
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= 100:
+        return cleaned
+    cut = cleaned[:100].rsplit(" ", 1)[0].rstrip(" ,;:-")
+    if len(cut) < 40:
+        cut = cleaned[:100].rstrip()
+    return cut
 
 
 def _bind_llm(llm, token: CancelToken, log: Log) -> None:
