@@ -324,6 +324,7 @@ body {
 textarea,
 input[type='text'],
 input[type='number'],
+input[type='date'],
 select {
   width: 100%;
   padding: 9px 12px;
@@ -336,6 +337,10 @@ select {
   outline: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
   user-select: text;
+}
+
+input[type='date'] {
+  color-scheme: dark;
 }
 
 input[type='text'],

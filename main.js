@@ -42,7 +42,7 @@ const {
 } = require('./downloader');
 
 const { analyzeRename, applyRename } = require('./renamer');
-const { ChannelCollector } = require('./channels');
+const { ChannelCollector, normalizeSinceDate } = require('./channels');
 const { updateInstalledYtDlp } = require('./scripts/ensure-ytdlp');
 
 const VIDEO_FILTER = {
@@ -1109,10 +1109,15 @@ handle('channels:start', async (ws, payload, rt) => {
   } catch (err) {
     return { ok: false, error: `Не удалось создать папку: ${err.message}` };
   }
+  const since = normalizeSinceDate(payload.since);
+  if (payload.since != null && String(payload.since).trim() && !since) {
+    return { ok: false, error: 'Дата указана неверно. Выберите день в календаре.' };
+  }
   const collector = new ChannelCollector({
     outputDir,
     ytdlpPath,
     count: payload.count,
+    since,
     hooks: {
       onLog: (level, message) => send(ws.id, 'channels:log', { level, message, time: Date.now() }),
       onProgress: (state) => send(ws.id, 'channels:progress', state)

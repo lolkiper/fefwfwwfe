@@ -3,8 +3,8 @@
 /**
  * channels.js — сбор ссылок на свежие короткие ролики с каналов YouTube.
  *
- * Видео не скачиваются. С каждого канала берутся N последних роликов.
- * Если ролик короче 2 минут, его ссылка дописывается в Links.txt.
+ * Видео не скачиваются. С каждого канала берутся ролики с указанной даты.
+ * Если ролик не длиннее 2,5 минут (150 с), его ссылка дописывается в Links.txt.
  * Уже виденные ролики запоминаются в channel_history.json: если новых
  * видео нет, канал пропускается и ссылка повторно не пишется.
  */
@@ -24,9 +24,10 @@ const {
 const LINKS_FILE = 'Links.txt';
 const HISTORY_FILE = 'channel_history.json';
 const LOG_FILE = 'channel_log.txt';
-const MAX_SHORT_SECONDS = 120;
+const MAX_SHORT_SECONDS = 150;
 const MAX_CHANNELS = 200;
 const MAX_VIDEO_COUNT = 50;
+const MAX_SINCE_VIDEOS = 400;
 const DEFAULT_VIDEO_COUNT = 1;
 const HISTORY_VERSION = 1;
 
@@ -34,6 +35,62 @@ function normalizeVideoCount(value) {
   const n = Math.round(Number(value));
   if (!Number.isFinite(n) || n < 1) return DEFAULT_VIDEO_COUNT;
   return Math.min(MAX_VIDEO_COUNT, n);
+}
+
+/** Дата «с какого дня» в виде YYYYMMDD. Принимает YYYY-MM-DD, YYYYMMDD и ДД.ММ.ГГГГ. */
+function normalizeSinceDate(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  let year;
+  let month;
+  let day;
+  let match = text.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (match) {
+    year = Number(match[1]);
+    month = Number(match[2]);
+    day = Number(match[3]);
+  } else if ((match = text.match(/^(\d{4})(\d{2})(\d{2})$/))) {
+    year = Number(match[1]);
+    month = Number(match[2]);
+    day = Number(match[3]);
+  } else if ((match = text.match(/^(\d{2})\.(\d{2})\.(\d{4})$/))) {
+    day = Number(match[1]);
+    month = Number(match[2]);
+    year = Number(match[3]);
+  } else {
+    return null;
+  }
+  const dt = new Date(Date.UTC(year, month - 1, day));
+  if (dt.getUTCFullYear() !== year || dt.getUTCMonth() !== month - 1 || dt.getUTCDate() !== day) return null;
+  const mm = String(month).padStart(2, '0');
+  const dd = String(day).padStart(2, '0');
+  return `${year}${mm}${dd}`;
+}
+
+function formatSinceDate(ymd) {
+  const text = String(ymd || '');
+  if (!/^\d{8}$/.test(text)) return text;
+  return `${text.slice(6, 8)}.${text.slice(4, 6)}.${text.slice(0, 4)}`;
+}
+
+function durationLimitLabel(seconds) {
+  const n = Number(seconds);
+  if (n === 150) return '2,5 минут';
+  if (n > 0 && n % 60 === 0) return `${n / 60} мин`;
+  return `${n} с`;
+}
+
+function uploadDateFrom(entry) {
+  if (!entry || typeof entry !== 'object') return null;
+  const raw = entry.upload_date || entry.release_date;
+  if (/^\d{8}$/.test(String(raw || ''))) return String(raw);
+  const ts = Number(entry.timestamp || entry.release_timestamp);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  const dt = new Date(ts * 1000);
+  const year = dt.getUTCFullYear();
+  const month = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(dt.getUTCDate()).padStart(2, '0');
+  return `${year}${month}${day}`;
 }
 
 function normalizeChannelUrl(raw) {
@@ -148,7 +205,8 @@ function videosFromPlaylist(info, limit) {
       id,
       url: watchUrl(id),
       title: entry.title || '',
-      duration: Number.isFinite(duration) ? duration : null
+      duration: Number.isFinite(duration) ? duration : null,
+      uploadDate: uploadDateFrom(entry)
     });
   });
   return videos;
@@ -162,7 +220,7 @@ function channelKeyFrom(info, inputUrl) {
 /**
  * latest — ролики от нового к старому.
  * ignored: среди них нет ни одного ещё не виденного.
- * Ссылка пишется только если длительность строго меньше maxSeconds.
+ * Ссылка пишется, если длительность не больше maxSeconds (до 150 с включительно).
  * Длинные ролики запоминаются, чтобы в следующий раз не считаться новыми.
  */
 function classifyFresh(videos, seen, maxSeconds = MAX_SHORT_SECONDS) {
@@ -180,7 +238,7 @@ function classifyFresh(videos, seen, maxSeconds = MAX_SHORT_SECONDS) {
       return;
     }
     markSeen.push(video.id);
-    if (duration < maxSeconds) links.push(video.url);
+    if (duration <= maxSeconds) links.push(video.url);
     else tooLong += 1;
   });
   return { ignored: false, links, markSeen, tooLong, unknown };
@@ -193,6 +251,7 @@ class ChannelCollector {
     this.runner = options.runner || null;
     this.hooks = options.hooks || {};
     this.count = normalizeVideoCount(options.count);
+    this.since = normalizeSinceDate(options.since);
     this.maxSeconds = Number(options.maxSeconds) > 0 ? Number(options.maxSeconds) : MAX_SHORT_SECONDS;
     this.stopped = false;
     this.running = false;
@@ -304,30 +363,50 @@ class ChannelCollector {
     const duration = info.duration == null ? null : Number(info.duration);
     return {
       duration: Number.isFinite(duration) ? duration : null,
-      title: info.title || ''
+      title: info.title || '',
+      uploadDate: uploadDateFrom(info)
     };
   }
 
   async listVideos(channelUrl) {
+    const limit = this.since ? MAX_SINCE_VIDEOS : this.count;
     const { stdout } = await this.runYtDlp([
       ...buildBaseYtDlpArgs({ ytdlpPath: this.ytdlpPath, playlist: true }),
       '--flat-playlist',
       '--playlist-end',
-      String(this.count),
+      String(limit),
       '-J',
       '--no-warnings',
       channelUrl
     ]);
     const info = this.parseInfo(stdout);
-    const videos = videosFromPlaylist(info, this.count);
+    const videos = videosFromPlaylist(info, limit);
+    const selected = [];
+    let reachedOlder = false;
     for (const video of videos) {
       if (this.stopped) break;
-      if (video.duration != null) continue;
-      const probed = await this.probeVideo(video.url);
-      video.duration = probed.duration;
-      if (probed.title) video.title = probed.title;
+      if (video.duration == null || (this.since && !video.uploadDate)) {
+        const probed = await this.probeVideo(video.url);
+        if (video.duration == null) video.duration = probed.duration;
+        if (!video.uploadDate && probed.uploadDate) video.uploadDate = probed.uploadDate;
+        if (probed.title) video.title = probed.title;
+      }
+      if (this.since) {
+        if (!video.uploadDate) continue;
+        if (video.uploadDate < this.since) {
+          reachedOlder = true;
+          break;
+        }
+      }
+      selected.push(video);
     }
-    return { key: channelKeyFrom(info, channelUrl), videos };
+    if (this.since && !reachedOlder && videos.length >= limit) {
+      this.log(
+        'warn',
+        `С ${formatSinceDate(this.since)} взяты первые ${limit} роликов, более старые не проверялись: ${channelUrl}`
+      );
+    }
+    return { key: channelKeyFrom(info, channelUrl), videos: selected };
   }
 
   async run(text) {
@@ -361,7 +440,13 @@ class ChannelCollector {
       linksFile: linksPath
     };
 
-    this.log('info', `Каналов: ${parsed.length}, последних видео с канала: ${this.count}, короче ${this.maxSeconds} с`);
+    const windowText = this.since
+      ? `с ${formatSinceDate(this.since)}, все ролики с этой даты`
+      : `последних видео с канала: ${this.count}`;
+    this.log(
+      'info',
+      `Каналов: ${parsed.length}, ${windowText}, не длиннее ${durationLimitLabel(this.maxSeconds)} (${this.maxSeconds} с)`
+    );
     if (truncated) this.log('warn', `Беру первые ${MAX_CHANNELS} каналов, остальные строки пропущены.`);
     this.emit(summary, 'Сбор ссылок');
 
@@ -404,7 +489,7 @@ class ChannelCollector {
           history.channels[key] = record;
           writeHistory(historyPath, history);
           if (!freshLinks.length && decision.tooLong && !decision.links.length) {
-            this.log('info', `Новые ролики длиннее 2 минут — ссылка не записана: ${channelUrl}`);
+            this.log('info', `Новые ролики длиннее ${durationLimitLabel(this.maxSeconds)} — ссылка не записана: ${channelUrl}`);
           } else if (!freshLinks.length && decision.unknown && !decision.links.length) {
             this.log('warn', `Длительность новых роликов неизвестна — ссылка не записана: ${channelUrl}`);
           } else if (!freshLinks.length) {
@@ -426,7 +511,7 @@ class ChannelCollector {
         summary.cancelled ? 'warn' : 'success',
         summary.cancelled
           ? `Сбор остановлен. Записано ссылок: ${summary.links}`
-          : `Готово. Ссылок: ${summary.links}, без новых видео: ${summary.ignored}, длиннее 2 минут: ${summary.tooLong}`
+          : `Готово. Ссылок: ${summary.links}, без новых видео: ${summary.ignored}, длиннее ${durationLimitLabel(this.maxSeconds)}: ${summary.tooLong}`
       );
       this.emit(summary, summary.cancelled ? 'Остановлено' : 'Готово');
       return summary;
@@ -444,8 +529,11 @@ module.exports = {
   MAX_SHORT_SECONDS,
   MAX_CHANNELS,
   MAX_VIDEO_COUNT,
+  MAX_SINCE_VIDEOS,
   DEFAULT_VIDEO_COUNT,
   normalizeVideoCount,
+  normalizeSinceDate,
+  formatSinceDate,
   normalizeChannelUrl,
   parseChannelList,
   classifyFresh,

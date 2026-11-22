@@ -715,16 +715,16 @@
 
           <article class="card">
             <div class="card__head">
-              <h2>2. Сколько роликов проверять</h2>
-              <span class="card__hint">С каждого канала</span>
+              <h2>2. С какой даты брать</h2>
+              <span class="card__hint">До 2,5 минут</span>
             </div>
             <div class="field">
-              <label for="ch-count">Последних видео с каждого канала</label>
-              <input type="number" id="ch-count" min="1" max="50" step="1" value="1" />
+              <label for="ch-since">Все ролики с этой даты</label>
+              <input type="date" id="ch-since" />
               <p class="field__note">
-                1 — берётся самое новое видео каждого канала. Если оно короче 2 минут, ссылка пишется в Links.txt.
-                Если длиннее — канал в этот раз ничего не добавляет. Уже виденные ролики запоминаются:
-                если новых нет, канал пропускается и ссылка повторно не пишется.
+                Например 10 ноября — дата меняется. С каждого канала берутся все ролики с этого дня включительно.
+                Если ролик не длиннее 2,5 минут (150 секунд), ссылка пишется в Links.txt.
+                Уже виденные ролики запоминаются: если новых нет, канал пропускается и ссылка повторно не пишется.
               </p>
             </div>
           </article>
@@ -758,13 +758,13 @@
               <h2>Сбор</h2>
               <span class="badge" id="ch-badge">Ожидание</span>
             </div>
-            <p class="status" id="ch-status">Вставьте каналы и укажите, сколько последних видео проверять.</p>
+            <p class="status" id="ch-status">Вставьте каналы и выберите дату, с которой брать ролики.</p>
             <div class="counters">
               <div class="counter"><span id="ch-total">0</span><small>каналов</small></div>
               <div class="counter"><span id="ch-checked">0</span><small>проверено</small></div>
               <div class="counter"><span id="ch-links-count">0</span><small>ссылок</small></div>
               <div class="counter"><span id="ch-ignored">0</span><small>без новых</small></div>
-              <div class="counter"><span id="ch-long">0</span><small>длиннее 2 мин</small></div>
+              <div class="counter"><span id="ch-long">0</span><small>длиннее 2,5 мин</small></div>
             </div>
           </article>
 

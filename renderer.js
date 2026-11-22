@@ -209,7 +209,7 @@ const el = {
 
   chLinks: document.getElementById('ch-links'),
   chLinksNote: document.getElementById('ch-links-note'),
-  chCount: document.getElementById('ch-count'),
+  chSince: document.getElementById('ch-since'),
   chDir: document.getElementById('ch-dir'),
   chDirNote: document.getElementById('ch-dir-note'),
   chPickDir: document.getElementById('ch-pick-dir'),
@@ -562,7 +562,7 @@ function collectSettings() {
     renameReports: el.rnReports.checked,
     renameKeepTxt: el.rnKeepTxt.checked,
     channelLinks: el.chLinks ? el.chLinks.value : '',
-    channelCount: el.chCount ? Number(el.chCount.value) : 1,
+    channelSince: el.chSince ? el.chSince.value : '',
     channelDir: el.chDir ? el.chDir.value.trim() : ''
   };
 }
@@ -725,10 +725,23 @@ function restoreSettings() {
   if (saved.renameKeepTxt != null) el.rnKeepTxt.checked = Boolean(saved.renameKeepTxt);
   if (el.chLinks && saved.channelLinks) el.chLinks.value = saved.channelLinks;
   if (el.chDir && saved.channelDir) el.chDir.value = saved.channelDir;
-  if (el.chCount && Number.isFinite(Number(saved.channelCount))) {
-    const count = Math.min(50, Math.max(1, Math.round(Number(saved.channelCount))));
-    el.chCount.value = String(count);
+  if (el.chSince) {
+    el.chSince.value = /^\d{4}-\d{2}-\d{2}$/.test(saved.channelSince || '') ? saved.channelSince : defaultSinceInput();
   }
+}
+
+function defaultSinceInput() {
+  const now = new Date();
+  let year = now.getFullYear();
+  let month = now.getMonth();
+  if (now.getDate() < 10) {
+    month -= 1;
+    if (month < 0) {
+      month = 11;
+      year -= 1;
+    }
+  }
+  return `${year}-${String(month + 1).padStart(2, '0')}-10`;
 }
 
 // ------------------------------------------------------- Проверка выбранного
@@ -2004,7 +2017,7 @@ function setChannelRunning(running) {
   state.collecting = Boolean(running);
   if (el.chStart) el.chStart.disabled = running;
   if (el.chStop) el.chStop.disabled = !running;
-  if (el.chCount) el.chCount.disabled = running;
+  if (el.chSince) el.chSince.disabled = running;
   if (el.chLinks) el.chLinks.readOnly = running;
 }
 
@@ -2032,7 +2045,7 @@ function bindChannelsUi() {
   };
   refreshOpen();
   if (el.chLinks) el.chLinks.addEventListener('change', saveSettings);
-  if (el.chCount) el.chCount.addEventListener('change', saveSettings);
+  if (el.chSince) el.chSince.addEventListener('change', saveSettings);
   if (el.chDir) {
     el.chDir.addEventListener('change', () => {
       saveSettings();
@@ -2064,6 +2077,10 @@ function bindChannelsUi() {
       el.chStatus.textContent = 'Список каналов пуст.';
       return;
     }
+    if (!el.chSince || !el.chSince.value) {
+      el.chStatus.textContent = 'Укажите дату, с которой брать ролики.';
+      return;
+    }
     if (!el.chDir.value.trim()) el.chDir.value = outputDir;
     saveSettings();
     await reportFolders();
@@ -2080,7 +2097,7 @@ function bindChannelsUi() {
     const result = await window.api.startChannels({
       outputDir,
       text,
-      count: el.chCount ? Number(el.chCount.value) : 1
+      since: el.chSince ? el.chSince.value : ''
     });
     if (result && !result.ok && !result.reported) {
       setChannelRunning(false);
@@ -2148,7 +2165,7 @@ function bindChannelsUi() {
     el.chBadge.textContent = 'Готово';
     el.chBadge.className = 'badge badge--done';
     el.chStatus.textContent =
-      `Готово. Ссылок: ${summary.links || 0}, без новых видео: ${summary.ignored || 0}, длиннее 2 минут: ${summary.tooLong || 0}.`;
+      `Готово. Ссылок: ${summary.links || 0}, без новых видео: ${summary.ignored || 0}, длиннее 2,5 минут: ${summary.tooLong || 0}.`;
   });
 }
 

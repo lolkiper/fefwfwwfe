@@ -15,10 +15,12 @@ const {
   LINKS_FILE,
   HISTORY_FILE,
   MAX_SHORT_SECONDS,
+  MAX_SINCE_VIDEOS,
   normalizeChannelUrl,
   parseChannelList,
   classifyFresh,
-  normalizeVideoCount
+  normalizeVideoCount,
+  normalizeSinceDate
 } = require('../channels');
 
 const ROOT = path.join(os.tmpdir(), `shorts-channels-smoke-${process.pid}`);
@@ -65,23 +67,30 @@ function main() {
   `);
   check(parsed.length === 2, 'дубликаты и не-каналы отбрасываются', parsed.join(' | '));
   check(normalizeVideoCount(0) === 1 && normalizeVideoCount(99) === 50 && normalizeVideoCount('3') === 3, 'число роликов в диапазоне 1…50');
-  check(MAX_SHORT_SECONDS === 120, 'порог короткого ролика — 2 минуты');
+  check(MAX_SHORT_SECONDS === 150, 'порог короткого ролика — 2,5 минуты');
+  check(normalizeSinceDate('2026-11-10') === '20261110', 'дата из календаря становится YYYYMMDD');
+  check(normalizeSinceDate('10.11.2026') === '20261110', 'дата ДД.ММ.ГГГГ принимается');
+  check(normalizeSinceDate('2026-02-31') === null, 'несуществующий день отвергается');
 
   const fresh = classifyFresh(
     [
       { id: 'NEWSHORT111', url: 'https://www.youtube.com/watch?v=NEWSHORT111', duration: 59 },
       { id: 'SEENSHORT11', url: 'https://www.youtube.com/watch?v=SEENSHORT11', duration: 40 },
       { id: 'TOOLONG1111', url: 'https://www.youtube.com/watch?v=TOOLONG1111', duration: 180 },
-      { id: 'EXACTLY1200', url: 'https://www.youtube.com/watch?v=EXACTLY1200', duration: 120 },
+      { id: 'EXACTLY150S', url: 'https://www.youtube.com/watch?v=EXACTLY150S', duration: 150 },
+      { id: 'OVER150SEC1', url: 'https://www.youtube.com/watch?v=OVER150SEC1', duration: 150.1 },
       { id: 'JUSTUNDER12', url: 'https://www.youtube.com/watch?v=JUSTUNDER12', duration: 119.9 }
     ],
-    new Set(['SEENSHORT11']),
-    120
+    new Set(['SEENSHORT11'])
   );
   check(!fresh.ignored, 'есть новое видео — канал не игнорируется');
-  check(fresh.links.length === 2 && fresh.links[0].includes('NEWSHORT111') && fresh.links[1].includes('JUSTUNDER12'), 'в ссылки попадают только ролики короче 2 минут', fresh.links.join(','));
-  check(fresh.tooLong === 2, 'ровно 2 минуты и длиннее не попадают в файл', String(fresh.tooLong));
-  check(fresh.markSeen.includes('TOOLONG1111') && fresh.markSeen.includes('EXACTLY1200'), 'длинные ролики запоминаются, чтобы не прийти снова');
+  check(
+    fresh.links.length === 3 && fresh.links[0].includes('NEWSHORT111') && fresh.links[1].includes('EXACTLY150S') && fresh.links[2].includes('JUSTUNDER12'),
+    'в ссылки попадают ролики до 150 секунд включительно',
+    fresh.links.join(',')
+  );
+  check(fresh.tooLong === 2, 'дольше 2,5 минут не попадает в файл', String(fresh.tooLong));
+  check(fresh.markSeen.includes('TOOLONG1111') && fresh.markSeen.includes('OVER150SEC1') && fresh.markSeen.includes('EXACTLY150S'), 'длинные ролики запоминаются, чтобы не прийти снова');
   check(classifyFresh([{ id: 'SEENSHORT11', duration: 30, url: 'u' }], ['SEENSHORT11']).ignored, 'если новых видео нет, канал игнорируется');
 
   console.log('\n2) Один последний ролик короче 2 минут пишется в Links.txt…');
@@ -176,6 +185,37 @@ function main() {
     const stopLinks = fs.readFileSync(path.join(stopDir, LINKS_FILE), 'utf8');
     check(!stopLinks.includes('NEXTVID1111'), 'ссылка непроверенного канала не записана');
     check(!stopLinks.includes('STOPVID1111'), 'канал, на котором нажали Стоп, не дописывает ссылку');
+
+    console.log('\n6) С выбранной даты берутся все ролики до 2,5 минут…');
+    const sinceDir = path.join(ROOT, 'since');
+    fs.mkdirSync(sinceDir, { recursive: true });
+    const day = (ymd) => Math.floor(Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1, Number(ymd.slice(6, 8)), 12) / 1000);
+    let playlistEnd = null;
+    const sinceCollector = new ChannelCollector({
+      outputDir: sinceDir,
+      since: '2026-11-10',
+      count: 1,
+      runner: async (args) => {
+        const endAt = args.indexOf('--playlist-end');
+        playlistEnd = endAt >= 0 ? args[endAt + 1] : null;
+        return playlist('UCsince', [
+          { id: 'NOV20SHORT1', duration: 140, timestamp: day('20261120'), title: '20 nov' },
+          { id: 'NOV10EXACT1', duration: 150, timestamp: day('20261110'), title: '10 nov exact' },
+          { id: 'NOV10TOOLNG', duration: 151, timestamp: day('20261110'), title: '10 nov long' },
+          { id: 'NOV09SHORT1', duration: 30, timestamp: day('20261109'), title: 'before date' },
+          { id: 'NOV01SHORT1', duration: 20, timestamp: day('20261101'), title: 'even older' }
+        ]);
+      }
+    });
+    const sinceSummary = await sinceCollector.run('@Since');
+    check(playlistEnd === String(MAX_SINCE_VIDEOS), 'с даты запрашивается окно роликов, а не одно последнее', playlistEnd);
+    check(sinceSummary.links === 2 && sinceSummary.tooLong === 1, 'с 10 ноября записаны ролики до 150 с, более длинный нет', JSON.stringify(sinceSummary));
+    const sinceLines = fs.readFileSync(path.join(sinceDir, LINKS_FILE), 'utf8');
+    check(sinceLines.includes('NOV20SHORT1') && sinceLines.includes('NOV10EXACT1'), 'ролики с даты и в сам день попали в Links.txt');
+    check(!sinceLines.includes('NOV09SHORT1') && !sinceLines.includes('NOV01SHORT1'), 'ролики раньше выбранной даты не записаны');
+    const sinceHistory = JSON.parse(fs.readFileSync(path.join(sinceDir, HISTORY_FILE), 'utf8'));
+    check(sinceHistory.channels.UCsince.seen.includes('NOV10TOOLNG'), 'длинный ролик с этой даты запомнен');
+    check(!sinceHistory.channels.UCsince.seen.includes('NOV09SHORT1'), 'ролик раньше даты не помечается просмотренным');
 
     fs.rmSync(ROOT, { recursive: true, force: true });
     console.log(`\nИтог: ${failures ? `${failures} проверок провалено` : 'все проверки каналов пройдены'}`);
