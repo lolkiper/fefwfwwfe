@@ -56,7 +56,26 @@ def build_providers(settings: AppSettings, secrets: SecretStore) -> Providers:
     )
 
 
+def _uses_tokenlavka(settings: AppSettings) -> bool:
+    if settings.llm.provider == "tokenlavka":
+        return True
+    return "tokenlavka.com" in (settings.llm.base_url or "").lower()
+
+
+def _uses_grok(settings: AppSettings, secrets: SecretStore) -> bool:
+    if _uses_tokenlavka(settings):
+        return False
+    key = secrets.get("llm") or ""
+    if settings.llm.provider == "grok" or "api.x.ai" in (settings.llm.base_url or "").lower():
+        return True
+    if settings.llm.provider not in {"gemini", ""}:
+        return False
+    return key.startswith("xai-")
+
+
 def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
+    if _uses_tokenlavka(settings) or _uses_grok(settings, secrets):
+        return False
     if settings.llm.provider == "pollinations" or "pollinations.ai" in (settings.llm.base_url or "").lower():
         return not secrets.get("llm") or settings.llm.provider == "pollinations"
     if settings.llm.provider == "gemini" and not secrets.get("llm"):
@@ -64,9 +83,38 @@ def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
     return settings.llm.provider == "llm7" and not secrets.get("llm")
 
 
+def picture_model(settings: AppSettings) -> str:
+    chosen = (settings.image.writer_model or "").strip()
+    if chosen:
+        return chosen
+    if _uses_tokenlavka(settings) and (settings.llm.model or "").strip():
+        return settings.llm.model.strip()
+    return "economy"
+
+
+def build_picture_llm(settings: AppSettings, secrets: SecretStore, story_llm: LLMProvider):
+    """Модель, которая пишет промпт кадра и текст превью. Картинку рисует другой сервис."""
+    if (settings.image.writer or "tokenlavka") == "story":
+        return story_llm
+    key = (secrets.get("llm") or "").strip() or (secrets.get("image") or "").strip()
+    if not key:
+        return None
+    return OpenAICompatLLM(
+        base_url="https://tokenlavka.com/v1",
+        api_key=key,
+        model=picture_model(settings),
+    )
+
+
 def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     if uses_pollinations(settings, secrets):
         story = "История: Pollinations GPT-OSS 20B, без ключа и без дневного лимита"
+    elif _uses_tokenlavka(settings):
+        model = settings.llm.model or "claude-fable-5-1"
+        story = f"История: Tokenlavka {model}, без паузы 46 секунд"
+    elif _uses_grok(settings, secrets):
+        model = settings.llm.model if "grok" in (settings.llm.model or "").lower() else "grok-4.7"
+        story = f"История: Grok {model}, без паузы 46 секунд"
     elif settings.llm.provider == "llm7":
         story = f"История: LLM7 {settings.llm.model}"
     elif settings.llm.provider == "gemini":
@@ -76,18 +124,32 @@ def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     else:
         story = f"История: {settings.llm.provider} {settings.llm.model}"
     if settings.image.provider == "flux":
-        picture = "картинка: FLUX.1 Schnell"
+        drawn = "FLUX.1 Schnell"
     else:
-        picture = f"картинка: {settings.image.provider} {settings.image.model}"
+        drawn = f"{settings.image.provider} {settings.image.model}"
+    if (settings.image.writer or "tokenlavka") == "story":
+        picture = f"фото и превью пишет модель истории, рисует {drawn}"
+    else:
+        picture = f"фото и превью пишет Tokenlavka {picture_model(settings)}, рисует {drawn}"
     if settings.voice.provider == "edge":
         voice = "голос: Edge Neural"
     else:
         voice = f"голос: {settings.voice.provider}"
-    return f"{story}; {picture}; {voice}. На проект по-прежнему одна картинка."
+    return f"{story}; {picture}; {voice}. На каждую главу своя картинка."
 
 
 def build_llm(settings: AppSettings, secrets: SecretStore):
     key = secrets.get("llm")
+    if _uses_tokenlavka(settings):
+        if not key:
+            raise ProviderError("Для Tokenlavka нужен ключ. Его вставляют в поле ключа языковой модели.")
+        base = settings.llm.base_url if "tokenlavka.com" in (settings.llm.base_url or "").lower() else "https://tokenlavka.com/v1"
+        return OpenAICompatLLM(base_url=base, api_key=key, model=settings.llm.model or "claude-fable-5-1")
+    if _uses_grok(settings, secrets):
+        if not key:
+            raise ProviderError("Для Grok нужен ключ с console.x.ai. Его вставляют в поле ключа языковой модели.")
+        model = settings.llm.model if "grok" in (settings.llm.model or "").lower() else "grok-4.7"
+        return OpenAICompatLLM(base_url="https://api.x.ai/v1", api_key=key, model=model)
     if uses_pollinations(settings, secrets):
         return OpenAICompatLLM(base_url=POLLINATIONS_BASE, api_key="", model=POLLINATIONS_MODEL)
     if settings.llm.provider == "llm7":

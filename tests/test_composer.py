@@ -1,3 +1,4 @@
+import json
 import subprocess
 import wave
 from pathlib import Path
@@ -58,6 +59,53 @@ def _frame(path: Path, second: float) -> np.ndarray:
     return np.frombuffer(raw, dtype=np.uint8).reshape((360, 640, 3))
 
 
+def test_render_signature_changes_with_the_frame_and_roundtrips(tmp_path):
+    from dramastill.media.composer import _movie_signature
+
+    image = tmp_path / "still.png"
+    audio = tmp_path / "voice.wav"
+    image.write_bytes(b"png")
+    audio.write_bytes(b"wav")
+    settings = VideoSettings()
+    first = _movie_signature(
+        settings=settings,
+        fps=30,
+        total_frames=300,
+        slices=[(0, 300)],
+        image=image,
+        audio=audio,
+        particles=None,
+    )
+    restored = json.loads(json.dumps(first))
+    assert restored == first
+    settings.width = 1280
+    changed = _movie_signature(
+        settings=settings,
+        fps=30,
+        total_frames=300,
+        slices=[(0, 300)],
+        image=image,
+        audio=audio,
+        particles=None,
+    )
+    assert changed != first
+
+
+def test_audio_slice_is_rebuilt_when_it_does_not_match(tmp_path):
+    from dramastill.media.composer import _slice_reusable
+
+    master = tmp_path / "master.wav"
+    _audio(master)
+    short = tmp_path / "slice.wav"
+    with wave.open(str(short), "w") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(48000)
+        handle.writeframes(b"\x00\x00" * 4800)
+    assert _slice_reusable(short, master, 4.0) is False
+    assert _slice_reusable(master, master, 4.0) is True
+
+
 def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch):
     commands = []
 
@@ -98,6 +146,95 @@ def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch
     assert "eval=frame" in graph
     assert "zoompan" not in graph
     assert graph.count("blend=all_mode=screen") == 1
+
+
+def test_chunk_moves_the_zoom_on_the_gpu_when_cuda_is_available(tmp_path, monkeypatch):
+    commands = []
+
+    def capture(cmd, **_kwargs):
+        commands.append(cmd)
+
+    monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
+    monkeypatch.setattr(
+        "dramastill.media.composer.encoder_args",
+        lambda *_args, **_kwargs: ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+    )
+    settings = VideoSettings()
+    settings.width = 640
+    settings.height = 360
+    settings.fps = 30
+    settings.visualizer = False
+    from dramastill.media.composer import _render_chunk
+
+    _render_chunk(
+        ffmpeg="ffmpeg",
+        image=tmp_path / "still.png",
+        audio=tmp_path / "voice.wav",
+        particles=None,
+        bands=None,
+        dest=tmp_path / "chunk.mkv",
+        settings=settings,
+        start_frame=30,
+        frames=8,
+        token=CancelToken(),
+        cache={"cuda_filters": True},
+        on_fraction=lambda _value: None,
+    )
+    command = commands[0]
+    assert "-init_hw_device" not in command
+    graph = command[command.index("-filter_complex") + 1]
+    assert "libplacebo=" in graph
+    assert "crop_w=" in graph
+    assert "[moved]," not in graph
+    assert "zoompan" not in graph
+
+
+def test_failed_gpu_zoom_falls_back_to_the_cpu_crop(tmp_path, monkeypatch):
+    from dramastill.media.ffmpeg_util import FFmpegError
+
+    commands = []
+
+    def capture(cmd, **_kwargs):
+        commands.append(cmd)
+        if "libplacebo=" in cmd[cmd.index("-filter_complex") + 1]:
+            raise FFmpegError("gpu")
+
+    monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
+    monkeypatch.setattr(
+        "dramastill.media.composer.encoder_args",
+        lambda *_args, **_kwargs: ["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+    )
+    settings = VideoSettings()
+    settings.width = 640
+    settings.height = 360
+    settings.fps = 12
+    settings.visualizer = False
+    notes = []
+    from dramastill.media.composer import _render_chunk
+
+    cache = {"cuda_filters": True}
+    _render_chunk(
+        ffmpeg="ffmpeg",
+        image=tmp_path / "still.png",
+        audio=tmp_path / "voice.wav",
+        particles=None,
+        bands=None,
+        dest=tmp_path / "chunk.mkv",
+        settings=settings,
+        start_frame=0,
+        frames=4,
+        token=CancelToken(),
+        cache=cache,
+        log=lambda *_args: notes.append(_args),
+        on_fraction=lambda _value: None,
+    )
+    assert cache["cuda_filters"] is False
+    assert "libplacebo=" in commands[0][commands[0].index("-filter_complex") + 1]
+    fallback = commands[1][commands[1].index("-filter_complex") + 1]
+    assert "libplacebo=" not in fallback
+    assert "crop=" in fallback
+    assert "-init_hw_device" not in commands[1]
+    assert notes
 
 
 def test_single_image_moves_and_bars_follow_voice(tmp_path):

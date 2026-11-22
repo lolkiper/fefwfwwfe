@@ -41,10 +41,16 @@ class OpenAICompatLLM:
         self.stop_check: Callable[[], None] | None = None
         self.model_chain: tuple[str, ...] = ()
         self._client: httpx.Client | None = None
+        self._client_lock = threading.Lock()
+
+    def retries_immediately(self) -> bool:
+        return "pollinations.ai" not in self.base_url.lower()
 
     def _http(self) -> httpx.Client:
         if self._client is None or self._client.is_closed:
-            self._client = httpx.Client(timeout=httpx.Timeout(300, connect=30), transport=self._transport)
+            with self._client_lock:
+                if self._client is None or self._client.is_closed:
+                    self._client = httpx.Client(timeout=httpx.Timeout(300, connect=30), transport=self._transport)
         return self._client
 
     def complete(
@@ -91,20 +97,23 @@ class OpenAICompatLLM:
                 models.append(name)
         last: ProviderError | None = None
         for index, model in enumerate(models):
-            self.model = model
             try:
-                return self._complete_model(
+                result = self._complete_model(
                     system=system,
                     user=user,
                     temperature=temperature,
                     max_tokens=max_tokens,
                     json_mode=json_mode,
+                    model=model,
                 )
             except ProviderError as exc:
                 last = exc
                 if not _quota_exhausted(exc) or index == len(models) - 1:
                     raise
                 self._note("Дневной лимит этой модели исчерпан, запрос уходит на следующую бесплатную модель")
+                continue
+            self.model = model
+            return result
         assert last is not None
         raise last
 
@@ -120,6 +129,7 @@ class OpenAICompatLLM:
         temperature: float,
         max_tokens: int,
         json_mode: bool,
+        model: str,
     ) -> LLMResult:
         def attempt() -> LLMResult:
             tried: set[tuple] = set()
@@ -130,7 +140,7 @@ class OpenAICompatLLM:
                     raise ProviderError("Языковая модель повторила тот же неудачный запрос")
                 tried.add(state)
                 payload: dict = {
-                    "model": self.model,
+                    "model": model,
                     "temperature": temperature,
                     "messages": [
                         {"role": "system", "content": system},
@@ -184,9 +194,10 @@ class OpenAICompatLLM:
             initial_reasoning = "low" if self._short_reasoning() else None
             return once(json_mode, "max_tokens", initial_reasoning, max_tokens)
 
+        hosted = "tokenlavka.com" in self.base_url.lower()
         return with_retries(
             attempt,
-            attempts=8,
+            attempts=4 if hosted else 8,
             on_wait=self.on_wait,
             stop_check=self.stop_check,
         )
@@ -197,6 +208,8 @@ class OpenAICompatLLM:
         return (
             "pollinations.ai" in url
             or "generativelanguage.googleapis.com" in url
+            or "api.x.ai" in url
+            or model.startswith("grok")
             or "gpt-oss" in model
             or model == "openai-fast"
         )

@@ -29,12 +29,19 @@ class MediaInfo:
 
 _ACTIVE: set[subprocess.Popen] = set()
 _ACTIVE_LOCK = threading.Lock()
+_NVENC_LOCK = threading.Lock()
 
 
 def subprocess_kwargs() -> dict:
-    if sys.platform == "win32":
-        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
-    return {}
+    if sys.platform != "win32":
+        return {}
+    info = subprocess.STARTUPINFO()
+    info.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    info.wShowWindow = 0
+    return {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        "startupinfo": info,
+    }
 
 
 def _tool_filename(name: str) -> str:
@@ -199,14 +206,32 @@ def run_ffmpeg(
     def read() -> None:
         stderr_box.append(read_stderr())
 
+    stop_watch = threading.Event()
+
+    def watch_cancel() -> None:
+        if token is None:
+            return
+        while not stop_watch.wait(0.2):
+            if not token.requested:
+                continue
+            try:
+                process.kill()
+            except OSError:
+                return
+            return
+
     reader = threading.Thread(target=read, daemon=True)
     reader.start()
+    watcher = threading.Thread(target=watch_cancel, daemon=True)
+    watcher.start()
     if frame_iter is not None:
         writer = threading.Thread(target=write_frames, daemon=True)
         writer.start()
         writer.join()
     code = process.wait()
+    stop_watch.set()
     reader.join()
+    watcher.join(timeout=1)
     with _ACTIVE_LOCK:
         _ACTIVE.discard(process)
     stderr = (stderr_box[0] if stderr_box else b"").decode("utf-8", errors="replace")
@@ -214,6 +239,8 @@ def run_ffmpeg(
         if isinstance(exc, BrokenPipeError):
             continue
         raise exc
+    if token is not None and token.requested:
+        token.check()
     if code != 0:
         tail = ffmpeg_error_text(stderr)
         raise FFmpegError(tail or f"ffmpeg завершился с кодом {code}")
@@ -267,7 +294,43 @@ def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict, threads: int
     ]
 
 
+def cuda_motion_works(ffmpeg: str, cache: dict) -> bool:
+    """True when Vulkan can move the Ken Burns window on this machine."""
+
+    with _NVENC_LOCK:
+        if "cuda_filters" in cache:
+            return bool(cache["cuda_filters"])
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.25:r=8",
+            "-vf",
+            "libplacebo=w=32:h=24:crop_w='iw/1.2':crop_h='ih/1.2':crop_x='(iw-cw)/2+sin(n)':crop_y='(ih-ch)/2':upscaler=bilinear",
+            "-frames:v",
+            "2",
+            "-f",
+            "null",
+            "-",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=20, **subprocess_kwargs())
+            cache["cuda_filters"] = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            cache["cuda_filters"] = False
+        return bool(cache["cuda_filters"])
+
+
 def nvenc_works(ffmpeg: str, cache: dict) -> bool:
+    with _NVENC_LOCK:
+        return _nvenc_works(ffmpeg, cache)
+
+
+def _nvenc_works(ffmpeg: str, cache: dict) -> bool:
     if "nvenc" in cache:
         return bool(cache["nvenc"])
     cmd = [

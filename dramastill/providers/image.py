@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import threading
+import time
 from pathlib import Path
+from urllib.parse import quote
 
 import httpx
 
@@ -11,6 +15,51 @@ from dramastill.core.redact import redact
 from dramastill.providers.errors import ProviderError
 from dramastill.providers.llm import _error_message
 from dramastill.providers.retry import RETRY_STATUSES, with_retries
+
+_FLUX_LOCK = threading.Lock()
+_BACKUP_LOCK = threading.Lock()
+_backup_not_before = 0.0
+_IMAGE_NOTE = threading.local()
+
+
+def take_image_note() -> str:
+    message = str(getattr(_IMAGE_NOTE, "message", "") or "")
+    _IMAGE_NOTE.message = ""
+    return message
+
+
+def _remember(message: str) -> None:
+    _IMAGE_NOTE.message = message
+
+
+def bind_image_log(log) -> None:
+    _IMAGE_NOTE.log = log
+
+
+def bind_image_stop(check) -> None:
+    _IMAGE_NOTE.stop = check
+
+
+def _image_log(level: str, message: str) -> None:
+    log = getattr(_IMAGE_NOTE, "log", None)
+    if log is not None:
+        log(level, message)
+
+
+def _stop() -> None:
+    check = getattr(_IMAGE_NOTE, "stop", None)
+    if check is not None:
+        check()
+
+
+def _wait(seconds: float) -> None:
+    remaining = min(50.0, max(0.0, seconds))
+    while remaining > 0.05:
+        _stop()
+        step = min(1.0, remaining)
+        time.sleep(step)
+        remaining -= step
+
 
 _NEGATIVE = (
     "text, letters, watermark, logo, caption, collage, split screen, comic panels, "
@@ -25,21 +74,40 @@ class FluxSchnellImageProvider:
         self.base_url = (base_url or FLUX_BASE).rstrip("/")
         self.model = model or "flux-1-schnell"
         self._transport = transport
+        self._flux_blocked = False
 
     def generate(self, *, prompt: str, dest: Path, size: str, seed: int | None) -> None:
         width, height = _flux_size(size)
-        text = " ".join(prompt.split())
-        if len(text) > 1800:
-            text = text[:1800]
-        chosen = 0 if seed is None or seed < 0 else int(seed)
-        randomize = seed is None or seed < 0
+        text = _clip_prompt(prompt)
+        chosen, randomize = _chosen_seed(text, seed)
+        if self._flux_blocked:
+            note = _from_pollinations(_safe_still_prompt(text), dest, width, height, chosen, self._transport)
+            _remember(note or "кадр взят с запасного адреса, FLUX недоступен")
+            return
+        try:
+            with _FLUX_LOCK:
+                self._draw(text, dest, width, height, chosen, randomize)
+            return
+        except ProviderError as exc:
+            if not _flux_give_up(exc):
+                raise
+        try:
+            with _FLUX_LOCK:
+                self._draw(_generic_still(), dest, width, height, chosen, True)
+            _remember("кадр без сюжета: фильтр FLUX отклонил описание главы")
+            return
+        except ProviderError:
+            self._flux_blocked = True
+        note = _from_pollinations(_safe_still_prompt(text), dest, width, height, chosen, self._transport)
+        _remember(note or "кадр взят с запасного адреса")
 
+    def _draw(self, body: str, dest: Path, width: int, height: int, chosen: int, randomize: bool) -> None:
         def once() -> None:
-            timeout = httpx.Timeout(300, connect=30)
+            timeout = httpx.Timeout(180, connect=20)
             with httpx.Client(timeout=timeout, follow_redirects=True, transport=self._transport) as client:
                 started = client.post(
                     f"{self.base_url}/gradio_api/call/infer",
-                    json={"data": [text, chosen, randomize, width, height, 4]},
+                    json={"data": [body, chosen, randomize, width, height, 4]},
                 )
                 if started.status_code in {408, 409, 429, 500, 502, 503, 504}:
                     raise ProviderError("FLUX временно занят, запрос повторяется", status=started.status_code, retryable=True)
@@ -57,9 +125,9 @@ class FluxSchnellImageProvider:
                 image = client.get(file_url)
             if image.status_code >= 400 or not _looks_like_image(image.content):
                 raise ProviderError("FLUX вернул не изображение", retryable=True)
-            dest.write_bytes(image.content)
+            _write_png(image.content, dest)
 
-        with_retries(once, attempts=4, base_delay=6)
+        with_retries(once, attempts=2, base_delay=4)
 
 
 class OpenAIImageProvider:
@@ -168,6 +236,138 @@ def _flux_size(size: str) -> tuple[int, int]:
     return width, height
 
 
+def _clip_prompt(prompt: str) -> str:
+    text = " ".join(prompt.split())
+    if len(text) > 1400:
+        text = text[:1400].rsplit(" ", 1)[0]
+    return text
+
+
+def _safe_still_prompt(prompt: str) -> str:
+    """Короткий кадр без сюжета, из-за которого фильтр FLUX отвечает null."""
+    head = prompt[:480].rsplit(" ", 1)[0] if len(prompt) > 480 else prompt
+    return (
+        f"{head}. Same people and wardrobe, a quiet tense moment in the same place. "
+        "Everyone is clothed and uninjured. No blood, wounds, weapons, nudity, or written text."
+    )
+
+
+def _generic_still() -> str:
+    return (
+        "photorealistic cinematic 16:9 film still, two clothed adults in a dim room, "
+        "serious faces, natural hands, everyone uninjured, no text, no blood, no weapons, no nudity"
+    )
+
+
+def _flux_give_up(exc: ProviderError) -> bool:
+    text = str(exc).lower()
+    return _filter_block(exc) or "не вернул" in text or "занят" in text or "скрыл" in text
+
+
+def _from_pollinations(
+    prompt: str,
+    dest: Path,
+    width: int,
+    height: int,
+    seed: int,
+    transport: httpx.BaseTransport | None,
+) -> str:
+    """Один бесплатный кадр в 45 секунд. Остальные запросы ждут, а не падают пачкой."""
+    global _backup_not_before
+    text = quote(f"{prompt[:420]} Still {seed}.", safe="")
+    url = f"https://image.pollinations.ai/prompt/{text}"
+    timeout = httpx.Timeout(90, connect=20)
+    for _attempt in range(5):
+        with _BACKUP_LOCK:
+            _stop()
+            pause = _backup_not_before - time.monotonic()
+            if pause > 0:
+                seconds = max(1, int(min(pause, 50) + 0.5))
+                _image_log("info", f"Запасной адрес: одна картинка в 45 с, пауза {seconds} с")
+                _wait(pause)
+            try:
+                with httpx.Client(timeout=timeout, follow_redirects=True, transport=transport) as client:
+                    response = client.get(
+                        url,
+                        params={
+                            "width": width,
+                            "height": height,
+                            "nologo": "true",
+                            "model": "flux",
+                            "seed": str(seed),
+                        },
+                    )
+            except (httpx.TimeoutException, httpx.TransportError):
+                _backup_not_before = time.monotonic() + 5
+                continue
+            if response.status_code < 400 and _looks_like_image(response.content):
+                try:
+                    _write_png(response.content, dest)
+                except Exception:
+                    _backup_not_before = time.monotonic() + 5
+                    continue
+                _backup_not_before = time.monotonic() + 45
+                return ""
+            if response.status_code == 402 or b"FREE_LIMIT" in response.content[:400]:
+                delay = _retry_delay(response)
+                _backup_not_before = time.monotonic() + delay
+                continue
+            _backup_not_before = time.monotonic() + 5
+    _local_still(dest, width, height, seed)
+    return "сервисы картинок не ответили, кадр собран на месте"
+
+
+def _retry_delay(response: httpx.Response) -> float:
+    header = response.headers.get("retry-after") or response.headers.get("Retry-After")
+    if header:
+        try:
+            return min(50.0, max(5.0, float(header)))
+        except ValueError:
+            pass
+    return 45.0
+
+
+def _chosen_seed(prompt: str, seed: int | None) -> tuple[int, bool]:
+    """Случайный режим всё равно даёт разный запасной кадр на каждую главу."""
+    if seed is None or seed < 0:
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return int(digest[:8], 16) % 2147483647 or 1, True
+    return int(seed) % 2147483647, False
+
+
+def _local_still(dest: Path, width: int, height: int, seed: int) -> None:
+    from PIL import Image, ImageDraw
+
+    value = int(seed) & 0x7FFFFFFF
+    tone = value % 180
+    image = Image.new("RGB", (width, height), (16 + tone % 40, 14 + (value // 7) % 28, 20 + (value // 19) % 32))
+    draw = ImageDraw.Draw(image)
+    span = max(8, width // 5)
+    left = (value % max(1, width - span))
+    top = ((value // 3) % max(1, height // 2))
+    draw.ellipse((left, top, left + span, top + span), fill=(60 + tone % 90, 46, 38 + value % 40))
+    mark = (value // 11) % max(1, width - 8)
+    draw.rectangle((mark, height // 3, mark + 18, min(height - 1, height // 3 + 70)), fill=(80, 60 + value % 50, 44))
+    image.save(dest, "PNG")
+
+
+def _filter_block(exc: ProviderError) -> bool:
+    text = str(exc).lower()
+    return "фильтром содержания" in text or "content filter" in text or "blocked" in text
+
+
+def _write_png(content: bytes, dest: Path) -> None:
+    if content.startswith(b"\x89PNG"):
+        dest.write_bytes(content)
+        return
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(content)) as image:
+        image.convert("RGB").save(dest, "PNG")
+
+
 def _flux_file_url(body: str) -> str:
     event = ""
     complete = ""
@@ -181,7 +381,13 @@ def _flux_file_url(body: str) -> str:
                 complete = data
             elif event == "error":
                 error = data
-    if not complete:
+    if not complete or complete.lower() == "null":
+        hidden = error.strip().lower() in {"", "null", "none"}
+        if hidden or "content filter" in error.lower() or "blocked" in error.lower():
+            raise ProviderError(
+                "FLUX отклонил кадр фильтром содержания или скрыл ошибку очереди",
+                retryable=False,
+            )
         raise ProviderError(error or "FLUX не вернул изображение", retryable=True)
     try:
         payload = json.loads(complete)

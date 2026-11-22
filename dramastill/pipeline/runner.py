@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import traceback
 from collections.abc import Callable
@@ -17,11 +18,11 @@ from dramastill.media.bookends import deliver_movie
 from dramastill.media.composer import render_movie
 from dramastill.media.ffmpeg_util import FFmpegError, probe, resolve_ffmpeg
 from dramastill.media.resources import chunk_workers, cooling_decision, project_slots
-from dramastill.media.image_service import ensure_image
+from dramastill.media.image_service import ensure_chapter_images
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
-from dramastill.media.tts_service import ChapterAudioPrefetch, ensure_narration_audio
-from dramastill.providers.factory import Providers, build_providers, describe_route
+from dramastill.media.tts_service import ChapterAudioPrefetch, chapter_time_spans, ensure_narration_audio
+from dramastill.providers.factory import Providers, build_picture_llm, build_providers, describe_route
 from dramastill.story.service import ensure_metadata, ensure_story
 from dramastill.util import format_clock, now_iso, safe_filename
 
@@ -66,6 +67,9 @@ def run_project(
     try:
         ffmpeg, ffprobe = resolve_ffmpeg(settings.video)
         active = providers or build_providers(settings, secrets)
+        picture_llm = build_picture_llm(settings, secrets, active.llm)
+        if (settings.image.writer or "tokenlavka") != "story" and picture_llm is None:
+            log("warning", "Для Tokenlavka нет ключа, описание кадра и превью собираются на месте")
         log("info", describe_route(settings, secrets))
         cooling = cooling_decision(settings.video)
         log("info", cooling.summary)
@@ -74,7 +78,8 @@ def run_project(
             "Скорость: "
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
             f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
-            "Картинка двигается через scale и crop, без zoompan. "
+            "Главы и проверка идут до 4 одновременно, озвучка до 6. "
+            "На каждую главу своя картинка. Движение через scale и crop, на видеокарте через Vulkan если она его принимает, без zoompan. "
             "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
         story_path = work / "story.json"
@@ -116,16 +121,18 @@ def run_project(
         if prefetch_error is not None:
             raise prefetch_error
         assert story is not None
+        log("info", "История и озвучка готовы, дальше кадры и монтаж")
         title = str(story.get("title") or project.title)
         db.update(project_id, title=title)
         if callbacks is not None:
             callbacks.title(title)
 
         progress(0.24, "prepare")
-        image, audio, metadata = _prepare_media(
+        images, audio, metadata = _prepare_media(
             settings=settings,
             story=story,
             active=active,
+            picture_llm=picture_llm,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
             work=work,
@@ -166,7 +173,7 @@ def run_project(
             final = render_movie(
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
-                image=image,
+                image=images[0],
                 audio=audio,
                 particles=particles,
                 bands=bands,
@@ -175,6 +182,7 @@ def run_project(
                 token=token,
                 log=log,
                 progress=lambda fraction: progress(0.66 + 0.28 * fraction, "render"),
+                chapter_spans=_chapter_spans(work, ffprobe, story, images, audio_info.duration, log),
             )
         else:
             log("info", "Готовое видео уже собрано, повторная сборка не нужна")
@@ -188,11 +196,15 @@ def run_project(
             log=log,
         )
         progress(0.95, "publish")
-        thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or title
-        thumbnail = compose_thumbnail(image, thumb_text, work / "thumbnail.jpg")
-        output = _publish(settings, title, project_id, delivered, thumbnail, work / "youtube.json")
+        show_title = str((metadata.get("titles") or [title])[0] or title)
+        thumb_text = metadata.get("thumbnail_text") or story.get("thumbnail_text") or show_title
+        still, chapter_no = _poster_still(story, images)
+        log("info", f"Превью собрано из кадра главы {chapter_no}: {show_title}")
+        thumbnail = compose_thumbnail(still, thumb_text, work / "thumbnail.jpg", lines=metadata.get("thumbnail_lines"))
+        output = _publish(settings, show_title, project_id, delivered, thumbnail, work / "youtube.json")
         if settings.video.cleanup_temp:
             _cleanup(work, log)
+        _accumulate_elapsed(db, project_id)
         db.update(
             project_id,
             status="completed",
@@ -200,8 +212,10 @@ def run_project(
             progress=1,
             output_path=str(output),
             error=None,
-            title=metadata["titles"][0],
+            title=show_title,
         )
+        if callbacks is not None:
+            callbacks.title(show_title)
         log("info", f"Видео сохранено: {output}")
         progress(1, "done")
         return output
@@ -225,19 +239,20 @@ def run_project(
         raise
 
 
-def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log, progress):
+def _prepare_media(*, settings, story, active, picture_llm, ffmpeg, ffprobe, work, token, log, progress):
     parallel = settings.video.performance_mode != "low" and settings.video.render_mode != "low_resource"
 
     def do_image():
         token.check()
         progress(0.26, "image")
-        return ensure_image(
+        return ensure_chapter_images(
             story=story,
             settings=settings.image,
             provider=active.image,
-            dest=work / "image.png",
-            prompt_path=work / "image_prompt.txt",
+            directory=work / "images",
             log=log,
+            token=token,
+            llm=picture_llm,
         )
 
     def do_audio():
@@ -259,7 +274,7 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
         token.check()
         return ensure_metadata(
             story=story,
-            llm=active.llm,
+            llm=picture_llm or active.llm,
             path=work / "youtube.json",
             settings=settings.story,
             temperature=settings.llm.temperature,
@@ -278,10 +293,55 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
         try:
             for future in as_completed(future_map):
                 results[future_map[future]] = future.result()
+        except (PipelineCancelled, PipelinePaused):
+            raise
         except Exception:
             token.request("cancel")
             raise
     return results["image"], results["audio"], results["meta"]
+
+
+def _chapter_spans(work: Path, ffprobe: str, story: dict, images: list[Path], duration: float, log) -> list[tuple[float, float, Path]]:
+    chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
+    by_number: dict[int, Path] = {}
+    for offset, (chapter, path) in enumerate(zip(chapters, images), start=1):
+        by_number[int(chapter.get("index") or offset)] = path
+    plan_path = work / "audio" / "plan.json"
+    spans: list[tuple[float, float, Path]] = []
+    if plan_path.exists():
+        try:
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            plan = []
+        if isinstance(plan, list):
+            for start, end, number in chapter_time_spans(plan, work / "audio" / "speech", ffprobe):
+                spans.append((start, end, by_number.get(number) or images[0]))
+    if not spans:
+        step = duration / max(1, len(images))
+        spans = [(index * step, (index + 1) * step, path) for index, path in enumerate(images)]
+    log("info", f"Видео получает {len(spans)} разных кадров, по одному на отрезок истории")
+    return spans
+
+
+def _poster_still(story: dict, images: list[Path]) -> tuple[Path, int]:
+    chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
+    best_score = 0
+    best_offset = 0
+    for offset, chapter in enumerate(chapters[: len(images)]):
+        purpose = str(chapter.get("purpose") or "").lower()
+        score = 1
+        if "turn" in purpose or "поворот" in purpose:
+            score = 4
+        elif "end" in purpose or "финал" in purpose:
+            score = 3
+        elif "escalat" in purpose or "кульмин" in purpose:
+            score = 2
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+    if best_score <= 1 and len(images) > 1:
+        best_offset = min(len(images) - 1, max(1, len(images) // 2))
+    return images[best_offset], best_offset + 1
 
 
 def _mode_label(mode: str) -> str:

@@ -1,3 +1,5 @@
+from datetime import datetime, timedelta, timezone
+
 from dramastill.config.defaults import AppSettings
 from dramastill.core.database import Database
 from dramastill.core.redact import redact
@@ -21,6 +23,20 @@ def test_project_roundtrip_and_resume_claim(tmp_path, monkeypatch):
     assert restored.settings.story.idea == "идея"
     db.add_log(project.id, "info", "шаг")
     assert db.logs(project.id)[0]["message"] == "шаг"
+
+
+def test_interrupted_work_keeps_the_time_already_spent(tmp_path):
+    db = Database(tmp_path / "app.sqlite3")
+    project = db.create_project(AppSettings(), "История")
+    db.claim_next_queued()
+    started = (datetime.now(timezone.utc) - timedelta(hours=2)).replace(microsecond=0).isoformat()
+    db.update(project.id, started_at=started)
+    assert db.recover_interrupted() == 1
+    restored = db.get(project.id)
+    assert restored is not None
+    assert restored.status == "paused"
+    assert restored.started_at is None
+    assert restored.elapsed_seconds > 7000
 
 
 def test_secrets_are_encrypted_and_logs_are_redacted(tmp_path):

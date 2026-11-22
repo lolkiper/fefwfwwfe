@@ -84,7 +84,7 @@ def motion_rate(fps: int) -> int:
 
     fps = max(8, int(fps))
     if fps >= 24:
-        return 12
+        return 8
     return fps
 
 
@@ -94,4 +94,24 @@ def ken_burns_filter(settings: VideoSettings, start_frame: int, fps: int, width:
         f"scale=w='{width}*({z_expr})':h='{height}*({z_expr})':"
         "force_original_aspect_ratio=increase:eval=frame:flags=bilinear,"
         f"crop={width}:{height}:x='{x_expr}':y='{y_expr}'"
+    )
+
+
+def ken_burns_gpu_filter(settings: VideoSettings, start_frame: int, fps: int, width: int, height: int) -> str:
+    """The same zoom and pan as the CPU crop, sampled on the GPU by Vulkan.
+
+    scale_cuda sizes the frame once and cannot follow ``n``, so the moving
+    window is a libplacebo crop. Vignette, sparks and the loudness bars stay
+    on the CPU: those filters have no GPU version.
+    """
+
+    z_expr, x_expr, y_expr = motion_expressions(settings, start_frame, fps)
+    drift_x = x_expr.removeprefix("(in_w-out_w)/2+")
+    drift_y = y_expr.removeprefix("(in_h-out_h)/2+")
+    return (
+        f"libplacebo=w={width}:h={height}:"
+        f"crop_w='iw/({z_expr})':crop_h='ih/({z_expr})':"
+        f"crop_x='(iw-cw)/2+({drift_x})*cw/{width}':"
+        f"crop_y='(ih-ch)/2+({drift_y})*ch/{height}':"
+        "upscaler=bilinear"
     )

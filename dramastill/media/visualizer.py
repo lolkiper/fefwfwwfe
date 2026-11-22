@@ -7,9 +7,12 @@ def parse_color(value: str, opacity: float) -> tuple[int, int, int]:
     text = (value or "#E6C36A").strip().lstrip("#")
     if len(text) != 6:
         text = "E6C36A"
-    red = int(text[0:2], 16)
-    green = int(text[2:4], 16)
-    blue = int(text[4:6], 16)
+    try:
+        red = int(text[0:2], 16)
+        green = int(text[2:4], 16)
+        blue = int(text[4:6], 16)
+    except ValueError:
+        red, green, blue = 0xE6, 0xC3, 0x6A
     factor = min(1.0, max(0.05, float(opacity)))
     return (
         max(0, min(255, int(round(red * factor)))),

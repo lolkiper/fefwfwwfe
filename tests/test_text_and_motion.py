@@ -3,7 +3,7 @@ import math
 import pytest
 
 from dramastill.config.defaults import VideoSettings
-from dramastill.media.motion import motion_expressions
+from dramastill.media.motion import ken_burns_gpu_filter, motion_expressions
 from dramastill.media.particles import LOOP_SECONDS, Particle, build_particles, position, presence, render_particle_frame
 from dramastill.story.textutil import extract_json, pack_sentences, split_sentences
 
@@ -12,6 +12,178 @@ def test_extract_json_from_fence():
     data = extract_json('```json\n{"title": "Дом", "n": 2,}\n```')
     assert data["title"] == "Дом"
     assert data["n"] == 2
+
+
+def test_extract_json_keeps_an_inner_quote():
+    raw = '{"narration": "Он сказал "нет" и вышел из дома, а потом долго молчал у окна.", "summary": "спор"}'
+    data = extract_json(raw)
+    assert "нет" in data["narration"]
+    assert data["summary"] == "спор"
+
+
+def test_extract_json_repairs_a_line_break_inside_the_text():
+    data = extract_json('Пояснение\n{"narration": "первая\nвторая",}')
+    assert data["narration"] == "первая\nвторая"
+
+
+def test_short_concept_still_gets_one_picture_moment():
+    from dramastill.story.service import _normalize_concept
+
+    story = _normalize_concept(
+        {
+            "title": "Чужое имя",
+            "logline": "Марина узнаёт, что завещание подписано чужой рукой.",
+            "characters": [{"name": "Марина", "role": "невестка", "age": 34, "appearance": "тёмные волосы"}],
+            "chapters": [{"title": "Ключ", "summary": "Она находит ключ от сейфа."}],
+        }
+    )
+    assert len(story["dramatic_moment"]) >= 40
+    assert "Марина" in story["dramatic_moment"]
+    assert story["characters"][0]["name"] == "Марина"
+
+
+def test_paced_model_does_not_spend_another_request_on_broken_json():
+    from dramastill.providers.base import LLMResult
+    from dramastill.providers.errors import ProviderError
+    from dramastill.story.service import _complete_json
+
+    class Once:
+        def __init__(self):
+            self.calls = 0
+
+        def retries_immediately(self) -> bool:
+            return False
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            return LLMResult("это не объект")
+
+    llm = Once()
+    try:
+        _complete_json(llm, system="s", user="u", temperature=0.2, max_tokens=100, log=lambda *_args: None)
+    except ProviderError as exc:
+        assert "46" in str(exc)
+    else:
+        raise AssertionError("сломанный ответ должен остановить запрос")
+    assert llm.calls == 1
+
+
+def test_plain_chapter_text_is_kept_without_a_second_request():
+    from dramastill.providers.base import LLMResult
+    from dramastill.story.service import _complete_json
+
+    class Once:
+        def __init__(self):
+            self.calls = 0
+
+        def retries_immediately(self) -> bool:
+            return True
+
+        def complete(self, **_kwargs):
+            self.calls += 1
+            return LLMResult(" ".join(["Марина открыла сейф и увидела чужое имя."] * 8))
+
+    llm = Once()
+    data = _complete_json(
+        llm, system="s", user="u", temperature=0.2, max_tokens=100, log=lambda *_args: None, allow_plain=True
+    )
+    assert llm.calls == 1
+    assert "Марина" in data["narration"]
+
+
+def test_chapters_are_written_ten_wide_and_a_bad_check_keeps_the_text(tmp_path):
+    from dramastill.cancel import CancelToken
+    from dramastill.config.defaults import StorySettings
+    from dramastill.providers.base import LLMResult
+    from dramastill.story.service import ensure_story
+
+    narration = " ".join(
+        [
+            "Марина открыла сейф и увидела чужое имя.",
+            "Бумага была сложена вдвое и пахла пылью.",
+            "Она узнала дату, которой не было в рассказах семьи.",
+            "Ключ остался в ладони, пока лампа качалась над столом.",
+            "Она не отдала бумагу, пока не сверила каждое слово.",
+            "За окном была ночь, и дом слушал их молча.",
+        ]
+    )
+    current = {"open": 0, "most": 0}
+    gate = __import__("threading").Lock()
+
+    class LLM:
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            task = user.splitlines()[0]
+            if task == "TASK: concept":
+                raise AssertionError("concept already exists")
+            if task == "TASK: consistency":
+                if "CHAPTER_INDEX: 2" in user:
+                    return LLMResult("не json")
+                return LLMResult('{"changed": false, "narration": "%s", "summary": "ок"}' % narration)
+            with gate:
+                current["open"] += 1
+                current["most"] = max(current["most"], current["open"])
+            try:
+                __import__("time").sleep(0.1)
+                return LLMResult('{"narration": "%s", "summary": "глава готова"}' % narration)
+            finally:
+                with gate:
+                    current["open"] -= 1
+
+    story = {
+        "title": "Сейф",
+        "dramatic_moment": "Marina stands at an open safe in a dark kitchen and holds a will.",
+        "characters": [{"name": "Марина", "appearance": "woman of 34 with dark hair and a grey coat, tired eyes"}],
+        "chapters": [
+            {"index": index, "title": f"Глава {index}", "summary": "Марина делает следующий шаг в споре из-за завещания."}
+            for index in range(1, 5)
+        ],
+    }
+    path = tmp_path / "story.json"
+    path.write_text(__import__("json").dumps(story, ensure_ascii=False), encoding="utf-8")
+    settings = StorySettings()
+    settings.consistency_check = True
+    settings.duration_minutes = 1
+    settings.words_per_minute = 20
+    settings.chapters = 4
+    result = ensure_story(
+        settings=settings,
+        llm=LLM(),
+        path=path,
+        narration_path=tmp_path / "narration.txt",
+        token=CancelToken(),
+        log=lambda *_args: None,
+        progress=lambda *_args: None,
+        temperature=0.4,
+        max_tokens=2000,
+    )
+    assert current["most"] >= 2
+    assert all((chapter.get("narration") or "").strip() for chapter in result["chapters"])
+    assert result["chapters"][1]["consistency_done"] is True
+    assert "Марина" in result["narration"]
+
+
+def test_repeated_sentences_are_removed_once():
+    from dramastill.story.textutil import drop_repeated_sentences
+
+    text = "Марина открыла сейф. Марина открыла сейф. Она прочитала имя."
+    cleaned = drop_repeated_sentences(text)
+    assert cleaned.count("сейф") == 1
+    assert "имя" in cleaned
+
+
+def test_chapter_slices_do_not_share_one_frame_range():
+    from pathlib import Path
+
+    from dramastill.media.composer import _chapter_slices
+
+    first = Path("a.png")
+    second = Path("b.png")
+    slices = _chapter_slices(100, 10, 3, [(0.0, 4.0, first), (4.0, 10.0, second)], first)
+    assert slices[0][2] == first
+    assert slices[-1][2] == second
+    covered = sum(count for _start, count, _path in slices)
+    assert covered == 100
+    assert slices[0][0] == 0
 
 
 def test_sentences_pack_without_losing_words():
@@ -26,8 +198,8 @@ def test_sentences_pack_without_losing_words():
 def test_motion_rate_repeats_frames_only_at_video_rates():
     from dramastill.media.motion import motion_rate
 
-    assert motion_rate(30) == 12
-    assert motion_rate(24) == 12
+    assert motion_rate(30) == 8
+    assert motion_rate(24) == 8
     assert motion_rate(20) == 20
     assert motion_rate(12) == 12
 
@@ -41,6 +213,22 @@ def test_motion_expressions_have_no_commas_and_continue():
     assert "n+0" in first
     assert "n+240" in later
     assert "zoompan" not in first
+
+
+def test_gpu_motion_keeps_the_same_pan_and_has_no_commas_inside_expressions():
+    settings = VideoSettings()
+    graph = ken_burns_gpu_filter(settings, 240, 8, 1920, 1080)
+    assert graph.startswith("libplacebo=")
+    assert "crop_w=" in graph
+    assert "crop_x=" in graph
+    assert "upscaler=bilinear" in graph
+    assert "zoompan" not in graph
+    assert "scale_cuda" not in graph
+    assert "(in_w-out_w)" not in graph
+    assert "n+240" in graph
+    quoted = [item for item in graph.split("'")[1::2]]
+    assert quoted
+    assert all("," not in item and ":" not in item for item in quoted)
 
 
 def test_particles_loop_and_avoid_the_center():
@@ -71,3 +259,59 @@ def test_flashes_are_brief_and_the_layer_loops():
     frame_start = render_particle_frame([peak], 80, 48, 0, LOOP_SECONDS, {})
     frame_end = render_particle_frame([peak], 80, 48, LOOP_SECONDS, LOOP_SECONDS, {})
     assert int(abs(frame_start.astype(int) - frame_end.astype(int)).mean()) == 0
+
+
+def test_metadata_failure_keeps_the_story_title(tmp_path):
+    from dramastill.cancel import CancelToken
+    from dramastill.config.defaults import StorySettings
+    from dramastill.providers.errors import ProviderError
+    from dramastill.story.service import ensure_metadata
+
+    class LLM:
+        def retries_immediately(self):
+            return False
+
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            raise ProviderError("Модель не вернула пригодный JSON")
+
+    story = {
+        "title": "Сейф",
+        "logline": "Спор из-за завещания",
+        "thumbnail_text": "СЕЙФ",
+        "narration": "Марина держит бумагу.",
+    }
+    notes = []
+    data = ensure_metadata(
+        story=story,
+        llm=LLM(),
+        path=tmp_path / "youtube.json",
+        settings=StorySettings(),
+        temperature=0.4,
+        max_tokens=800,
+        token=CancelToken(),
+        log=lambda level, message: notes.append((level, message)),
+    )
+    assert data["titles"] == ["Сейф"]
+    assert data["thumbnail_text"] == "СЕЙФ"
+    assert [item["tone"] for item in data["thumbnail_lines"]][0] == "yellow"
+    assert data["thumbnail_lines"][-1]["tone"] == "red"
+    assert "завещания" in data["description"]
+    assert any("Название собрано из истории" in message for _level, message in notes)
+
+
+def test_narration_without_a_stamp_is_rebuilt(tmp_path, monkeypatch):
+    from dramastill.media.tts_service import _narration_reusable
+
+    master = tmp_path / "narration.wav"
+    master.write_bytes(b"x" * 1000)
+    stamp = tmp_path / "narration.stamp"
+
+    class Info:
+        has_audio = True
+        duration = 12.0
+
+    monkeypatch.setattr("dramastill.media.tts_service.probe", lambda *_args: Info())
+    assert _narration_reusable("ffprobe", master, stamp, "current") is False
+    stamp.write_text("current", encoding="utf-8")
+    assert _narration_reusable("ffprobe", master, stamp, "current") is True
+    assert _narration_reusable("ffprobe", master, stamp, "other") is False

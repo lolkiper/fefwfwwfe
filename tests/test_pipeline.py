@@ -14,7 +14,16 @@ from dramastill.pipeline.runner import run_project
 from dramastill.providers.base import LLMResult
 from dramastill.providers.errors import ProviderError
 
-NARRATION = " ".join(["Марина услышала чужое имя в завещании и не стала молчать."] * 8)
+NARRATION = " ".join(
+    [
+        "Марина услышала чужое имя в завещании и не стала молчать.",
+        "Она достала ключ, который прятали в старом пальто.",
+        "Сейф открылся тихо, и бумага оказалась теплее рук.",
+        "Подпись на листе не совпала с почерком свекрови.",
+        "Марина сверила дату и поняла, что документ новее.",
+        "В кухне горела одна лампа, и спор уже нельзя было отложить.",
+    ]
+)
 
 
 def _concept() -> dict:
@@ -77,7 +86,8 @@ class OneImage:
 
     def generate(self, *, prompt, dest, size, seed):
         self.calls += 1
-        image = Image.new("RGB", (640, 360), (24, 18, 20))
+        tone = 20 + (sum(prompt.encode("utf-8")) % 180)
+        image = Image.new("RGB", (640, 360), (tone, 18, 20))
         draw = ImageDraw.Draw(image)
         draw.rectangle((0, 0, 36, 360), fill=(170, 40, 40))
         draw.rectangle((604, 0, 640, 360), fill=(30, 40, 170))
@@ -162,13 +172,15 @@ def test_pipeline_creates_one_image_and_resumes(tmp_path, monkeypatch):
     output = run_project(db, project.id, SecretStore(tmp_path / "secrets"), CancelToken(), providers=providers)
     done = db.get(project.id)
     assert done.status == "completed"
-    assert image.calls == 1
+    assert done.started_at is None
+    assert done.elapsed_seconds > 0
+    assert image.calls == 2
     assert voice.calls[spoken_before:] == ["00001.partial.mp3"]
     assert output.exists()
     assert output.with_suffix(".jpg").exists()
     assert output.with_suffix(".youtube.json").exists()
-    pngs = list(Path(project.work_dir).rglob("*.png"))
-    assert pngs == [Path(project.work_dir) / "image.png"]
+    pngs = sorted(Path(project.work_dir).rglob("*.png"))
+    assert [path.name for path in pngs] == ["chapter_01.png", "chapter_02.png"]
     assert not (Path(project.work_dir) / "chunks").exists()
     metadata = json.loads(output.with_suffix(".youtube.json").read_text(encoding="utf-8"))
     assert "ЧУЖОЕ ЗАВЕЩАНИЕ" == metadata["thumbnail_text"]

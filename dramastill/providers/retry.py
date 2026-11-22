@@ -39,6 +39,18 @@ def daily_quota(response: httpx.Response) -> bool:
     return response.status_code in {402, 429} and "quota" in text
 
 
+def _wait_message(exc: ProviderError, delay: float) -> str:
+    seconds = max(1, int(delay + 0.5))
+    reason = " ".join(str(exc).split())
+    if "free limit" in reason.lower():
+        return f"Лимит бесплатной модели: пауза {seconds} с, запрос продолжится сам"
+    if len(reason) > 160:
+        reason = reason[:160].rstrip() + "…"
+    if not reason:
+        reason = "Сервис не ответил"
+    return f"{reason} Пауза {seconds} с, запрос продолжится сам"
+
+
 def sleep_until(seconds: float, stop_check: Callable[[], None] | None = None) -> None:
     if seconds <= 0:
         return
@@ -71,11 +83,12 @@ def with_retries(
             if not exc.retryable or attempt == attempts - 1:
                 raise
             if exc.retry_after is None:
-                delay = base_delay * (2**attempt) + random.random() * 0.4
+                # Без срока от сервера пауза не растёт дальше нескольких секунд.
+                delay = min(6.0, base_delay * (2**attempt)) + random.random() * 0.3
             else:
-                delay = min(90.0, exc.retry_after)
-            if delay >= 5 and on_wait is not None:
-                on_wait(f"Лимит бесплатной модели: пауза {max(1, int(delay + 0.5))} с, запрос продолжится сам")
+                delay = min(90.0, max(0.0, exc.retry_after))
+            if on_wait is not None and (attempt == 0 or delay >= 3):
+                on_wait(_wait_message(exc, delay))
             sleep_until(delay, stop_check)
         except (httpx.TimeoutException, httpx.TransportError) as exc:
             last = exc
@@ -84,6 +97,10 @@ def with_retries(
                     "Сеть недоступна или сервис не ответил вовремя",
                     retryable=True,
                 ) from exc
-            sleep_until(base_delay * (2**attempt) + random.random() * 0.4, stop_check)
+            delay = min(6.0, base_delay * (2**attempt)) + random.random() * 0.3
+            if on_wait is not None:
+                seconds = max(1, int(delay + 0.5))
+                on_wait(f"Сеть не ответила. Пауза {seconds} с, запрос продолжится сам")
+            sleep_until(delay, stop_check)
     assert last is not None
     raise last

@@ -73,7 +73,11 @@ def run_on_worker(
     if not urls:
         return "fallback"
     statuses, contacted = _health(urls, project.settings.video.worker_token, token)
-    choice = choose_worker(statuses, temp_limit=float(project.settings.video.temp_limit_c or 82))
+    choice = choose_worker(
+        statuses,
+        temp_limit=float(project.settings.video.temp_limit_c or 82),
+        cpu_limit=float(project.settings.video.max_cpu_percent or 0),
+    )
     if choice is None:
         if contacted == 0:
             return "fallback"
@@ -97,14 +101,23 @@ def run_on_worker(
             _hold_until = time.monotonic() + 5
             return "wait"
         return "fallback"
-    except (OSError, urllib.error.URLError):
-        return "fallback"
+    except (OSError, urllib.error.URLError, TimeoutError):
+        if not _server_has_job(choice, project.id, project.settings.video.worker_token):
+            return "fallback"
     info = {"url": choice, "id": project.id, "token": project.settings.video.worker_token}
     marker.write_text(json.dumps(info), encoding="utf-8")
     if callbacks is not None:
         callbacks.log("info", f"Проект отправлен на сервер {choice}. Компьютер может отключиться, сервер продолжит.")
     _finish(db, project, info, token, callbacks)
     return "done"
+
+
+def _server_has_job(url: str, job_id: str, token: str) -> bool:
+    try:
+        status = _request("GET", f"{url}/v1/jobs/{job_id}", token, None)
+    except (OSError, urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError):
+        return False
+    return str(status.get("status") or "") in {"queued", "running", "completed"}
 
 
 def _health(urls: list[str], token: str, cancel: CancelToken) -> tuple[list[WorkerStatus], int]:
@@ -162,6 +175,9 @@ def _finish(db: Database, project, info: dict, token: CancelToken, callbacks: Ca
             message = str(status.get("error") or "Сервер не собрал видео")
             db.update(project.id, status="failed", error=message)
             raise RuntimeError(message)
+        if state == "cancelled":
+            db.update(project.id, status="cancelled", error="Остановлено пользователем")
+            raise PipelineCancelled("Сборка остановлена")
         if state == "completed":
             break
         time.sleep(2)
@@ -183,13 +199,24 @@ def _finish(db: Database, project, info: dict, token: CancelToken, callbacks: Ca
 
 def _download(url: str, token: str, dest: Path) -> None:
     request = urllib.request.Request(url, headers=_headers(token))
+    temporary = dest.with_suffix(dest.suffix + ".partial")
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            dest.write_bytes(response.read())
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as handle:
+            while True:
+                chunk = response.read(1024 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
     except urllib.error.HTTPError as exc:
+        temporary.unlink(missing_ok=True)
         if exc.code == 404:
+            dest.unlink(missing_ok=True)
             return
         raise
+    except Exception:
+        temporary.unlink(missing_ok=True)
+        raise
+    temporary.replace(dest)
 
 
 def _request(method: str, url: str, token: str, payload: dict | None) -> dict:

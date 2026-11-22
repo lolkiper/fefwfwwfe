@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import shutil
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import urlparse
 
+from dramastill.cancel import CancelToken, PipelineCancelled
 from dramastill.config.defaults import app_settings_from_dict
 from dramastill.core.database import Database
 from dramastill.core.secrets import SecretStore
@@ -25,6 +27,7 @@ Executor = Callable[[dict, Path], None]
 
 
 _STATUS_LOCK = threading.Lock()
+_JOB_ID = re.compile(r"^[A-Za-z0-9_-]{1,80}$")
 
 
 def pipeline_executor(payload: dict, job_dir: Path) -> None:
@@ -36,18 +39,26 @@ def pipeline_executor(payload: dict, job_dir: Path) -> None:
         secrets.set_many({str(key): str(value) for key, value in incoming.items() if value})
     database = Database(job_dir / "worker.sqlite3")
     project = database.create_project(settings, str(payload.get("title") or "DramaStill"), job_dir / "work")
-    result = run_project(database, project.id, secrets, _token())
+    token = CancelToken()
+    stop = threading.Event()
+
+    def watch() -> None:
+        while not stop.wait(0.3):
+            if _read_status(job_dir).get("cancel_requested"):
+                token.request("cancel")
+                return
+
+    watcher = threading.Thread(target=watch, name="dramastill-cancel", daemon=True)
+    watcher.start()
+    try:
+        result = run_project(database, project.id, secrets, token)
+    finally:
+        stop.set()
     shutil.copy2(result, job_dir / "output.mp4")
     for suffix in (".jpg", ".youtube.json"):
         source = result.with_suffix(suffix)
         if source.exists():
             shutil.copy2(source, job_dir / f"sidecar{suffix}")
-
-
-def _token():
-    from dramastill.cancel import CancelToken
-
-    return CancelToken()
 
 
 def start_worker(
@@ -120,12 +131,7 @@ def _handler(state: _State):
             if not target.exists() or not target.is_file():
                 self._json(404, {"error": "Файл ещё не готов"})
                 return
-            data = target.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            self._send_file(target)
 
         def do_POST(self) -> None:
             if not self._allowed():
@@ -153,29 +159,34 @@ def _handler(state: _State):
                 self._json(400, {"error": "Задание не разбирается"})
                 return
             job_id = str(payload.get("id") or "").strip()
-            if not job_id or "/" in job_id or "\\" in job_id or job_id in {".", ".."}:
+            if not _JOB_ID.fullmatch(job_id):
                 self._json(400, {"error": "У задания нет идентификатора"})
-                return
-            job_dir = state.directory / job_id
-            existing = _read_status(job_dir)
-            if existing.get("status") in {"running", "completed", "queued"}:
-                self._json(202, {"id": job_id, "status": existing.get("status"), "continues_without_client": True})
                 return
             health = state.health()
             if health["temp_c"] is not None and health["temp_c"] >= 85:
                 self._json(429, {"error": "Сервер перегрет", "health": health})
                 return
             job_dir = state.directory / job_id
-            job_dir.mkdir(parents=True, exist_ok=True)
             with state.lock:
+                existing = _read_status(job_dir)
+                if existing.get("status") in {"running", "completed", "queued"}:
+                    self._json(202, {"id": job_id, "status": existing.get("status"), "continues_without_client": True})
+                    return
                 if state.busy >= state.capacity:
-                    self._json(429, {"error": "Сервер занят", "health": state.health()})
+                    self._json(429, {"error": "Сервер занят", "health": health})
                     return
                 state.busy += 1
-            (job_dir / "request.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            _write_status(job_dir, {"status": "queued", "progress": 0, "stage": "queued", "error": ""})
+                job_dir.mkdir(parents=True, exist_ok=True)
+                (job_dir / "request.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                _write_status(job_dir, {"status": "queued", "progress": 0, "stage": "queued", "error": ""})
             thread = threading.Thread(target=_run_job, args=(state, job_dir, payload), name=f"job-{job_id}", daemon=True)
-            thread.start()
+            try:
+                thread.start()
+            except RuntimeError:
+                with state.lock:
+                    state.busy = max(0, state.busy - 1)
+                self._json(500, {"error": "Сервер не смог запустить задание"})
+                return
             self._json(202, {"id": job_id, "status": "queued", "continues_without_client": True})
 
         def _allowed(self) -> bool:
@@ -192,6 +203,19 @@ def _handler(state: _State):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_file(self, target: Path) -> None:
+            length = target.stat().st_size
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(length))
+            self.end_headers()
+            with target.open("rb") as handle:
+                while True:
+                    chunk = handle.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+
     return Handler
 
 
@@ -199,11 +223,15 @@ def _run_job(state: _State, job_dir: Path, payload: dict) -> None:
     _write_status(job_dir, {"status": "running", "progress": 0.01, "stage": "running", "error": ""})
     try:
         state.executor(payload, job_dir)
+    except PipelineCancelled:
+        _write_status(job_dir, {"status": "cancelled", "error": "Остановлено пользователем", "stage": "cancelled"})
     except Exception as exc:
         _write_status(job_dir, {"status": "failed", "error": str(exc), "stage": "failed"})
     else:
         current = _read_status(job_dir)
-        if current.get("status") != "failed":
+        if current.get("cancel_requested"):
+            _write_status(job_dir, {"status": "cancelled", "error": "Остановлено пользователем", "stage": "cancelled"})
+        elif current.get("status") != "failed":
             _write_status(job_dir, {"status": "completed", "progress": 1, "stage": "done", "error": ""})
     finally:
         with state.lock:
@@ -217,7 +245,7 @@ def _job_path(path: str) -> tuple[str | None, str]:
     job_id = parts[2]
     leaf = parts[3] if len(parts) > 3 else ""
     allowed = {"", "output.mp4", "sidecar.jpg", "sidecar.youtube.json", "cancel"}
-    if leaf not in allowed or "/" in job_id or "\\" in job_id:
+    if leaf not in allowed or not _JOB_ID.fullmatch(job_id):
         return None, ""
     return job_id, leaf
 
