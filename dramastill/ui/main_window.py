@@ -353,9 +353,15 @@ class MainWindow(QMainWindow):
         self._title(
             layout,
             "Изображение",
-            "Одна картинка 16:9 рисуется бесплатной моделью FLUX.1 Schnell. Ключ не нужен. Внешность персонажей входит в этот единственный запрос.",
+            "Текст кадра и превью пишет Tokenlavka, ключ берётся у языковой модели. Модель можно сменить. Саму картинку рисует сервис ниже, по умолчанию FLUX.",
         )
         box, form = self._group("Провайдер")
+        self.image_writer = self._combo(
+            [("tokenlavka", "Tokenlavka"), ("story", "Как у истории")],
+            self.settings.image.writer or "tokenlavka",
+        )
+        self.image_writer_model = QLineEdit(self.settings.image.writer_model)
+        self.image_writer_model.setPlaceholderText("пусто — модель истории, иначе economy")
         self.image_provider = self._combo([(key, label) for key, label, _url, _model in IMAGE_PRESETS], self.settings.image.provider)
         self.image_url = QLineEdit(self.settings.image.base_url)
         self.image_model = QLineEdit(self.settings.image.model)
@@ -370,7 +376,9 @@ class MainWindow(QMainWindow):
         self.image_lock.setChecked(self.settings.image.consistency_lock)
         self.image_seed = self._int(-1, 2_000_000_000, self.settings.image.seed)
         self.image_seed.setToolTip("-1 означает, что сервис выберет seed сам")
-        form.addRow("Сервис", self.image_provider)
+        form.addRow("Текст фото и превью", self.image_writer)
+        form.addRow("Модель текста", self.image_writer_model)
+        form.addRow("Сервис картинки", self.image_provider)
         form.addRow("Адрес API", self.image_url)
         form.addRow("Модель", self.image_model)
         form.addRow("Размер запроса", self.image_size)
@@ -732,6 +740,8 @@ class MainWindow(QMainWindow):
         settings.llm.model = self.llm_model.text().strip()
         settings.llm.temperature = self.llm_temp.value()
         settings.llm.max_tokens = self.llm_tokens.value()
+        settings.image.writer = self.image_writer.currentData() or "tokenlavka"
+        settings.image.writer_model = self.image_writer_model.text().strip()
         settings.image.provider = self.image_provider.currentData()
         settings.image.base_url = self.image_url.text().strip()
         settings.image.model = self.image_model.text().strip()

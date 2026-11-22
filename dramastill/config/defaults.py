@@ -181,6 +181,8 @@ class ImageSettings:
     style_extra: str = ""
     consistency_lock: bool = True
     seed: int = -1
+    writer: str = "tokenlavka"
+    writer_model: str = ""
 
 
 @dataclass

@@ -97,25 +97,21 @@ def ken_burns_filter(settings: VideoSettings, start_frame: int, fps: int, width:
     )
 
 
-def ken_burns_cuda_graph(settings: VideoSettings, start_frame: int, fps: int, width: int, height: int) -> str:
-    """Zoom on scale_cuda and the same pan as a CUDA overlay.
+def ken_burns_gpu_filter(settings: VideoSettings, start_frame: int, fps: int, width: int, height: int) -> str:
+    """The same zoom and pan as the CPU crop, sampled on the GPU by Vulkan.
 
-    The visible window matches the CPU crop: the scaled frame is shifted by
-    the negative crop origin. Vignette, sparks and the loudness bars stay on
-    the CPU after hwdownload, because those filters have no CUDA version.
+    scale_cuda sizes the frame once and cannot follow ``n``, so the moving
+    window is a libplacebo crop. Vignette, sparks and the loudness bars stay
+    on the CPU: those filters have no GPU version.
     """
 
     z_expr, x_expr, y_expr = motion_expressions(settings, start_frame, fps)
     drift_x = x_expr.removeprefix("(in_w-out_w)/2+")
     drift_y = y_expr.removeprefix("(in_h-out_h)/2+")
-    rate = max(1, int(fps))
     return (
-        "format=nv12,hwupload_cuda,"
-        f"scale_cuda=w='{width}*({z_expr})':h='{height}*({z_expr})':"
-        "force_original_aspect_ratio=increase:eval=frame:interp_algo=bilinear[zoomed];"
-        f"color=c=black:s={width}x{height}:r={rate},format=nv12,hwupload_cuda[canvas];"
-        "[canvas][zoomed]overlay_cuda="
-        f"x='-((overlay_w-main_w)/2+({drift_x}))':"
-        f"y='-((overlay_h-main_h)/2+({drift_y}))':"
-        "eval=frame:shortest=1,hwdownload,format=yuv420p"
+        f"libplacebo=w={width}:h={height}:"
+        f"crop_w='iw/({z_expr})':crop_h='ih/({z_expr})':"
+        f"crop_x='(iw-cw)/2+({drift_x})*cw/{width}':"
+        f"crop_y='(ih-ch)/2+({drift_y})*ch/{height}':"
+        "upscaler=bilinear"
     )

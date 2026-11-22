@@ -3,7 +3,7 @@ import math
 import pytest
 
 from dramastill.config.defaults import VideoSettings
-from dramastill.media.motion import ken_burns_cuda_graph, motion_expressions
+from dramastill.media.motion import ken_burns_gpu_filter, motion_expressions
 from dramastill.media.particles import LOOP_SECONDS, Particle, build_particles, position, presence, render_particle_frame
 from dramastill.story.textutil import extract_json, pack_sentences, split_sentences
 
@@ -215,19 +215,20 @@ def test_motion_expressions_have_no_commas_and_continue():
     assert "zoompan" not in first
 
 
-def test_cuda_motion_keeps_the_same_pan_and_has_no_commas_inside_expressions():
+def test_gpu_motion_keeps_the_same_pan_and_has_no_commas_inside_expressions():
     settings = VideoSettings()
-    graph = ken_burns_cuda_graph(settings, 240, 8, 1920, 1080)
-    assert "scale_cuda" in graph
-    assert "overlay_cuda" in graph
-    assert "eval=frame" in graph
-    assert "hwdownload" in graph
+    graph = ken_burns_gpu_filter(settings, 240, 8, 1920, 1080)
+    assert graph.startswith("libplacebo=")
+    assert "crop_w=" in graph
+    assert "crop_x=" in graph
+    assert "upscaler=bilinear" in graph
     assert "zoompan" not in graph
+    assert "scale_cuda" not in graph
     assert "(in_w-out_w)" not in graph
     assert "n+240" in graph
     quoted = [item for item in graph.split("'")[1::2]]
     assert quoted
-    assert all("," not in item for item in quoted)
+    assert all("," not in item and ":" not in item for item in quoted)
 
 
 def test_particles_loop_and_avoid_the_center():

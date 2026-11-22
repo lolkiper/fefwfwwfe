@@ -16,7 +16,7 @@ from dramastill.media.ffmpeg_util import (
     probe,
     run_ffmpeg,
 )
-from dramastill.media.motion import ken_burns_cuda_graph, ken_burns_filter, motion_rate
+from dramastill.media.motion import ken_burns_filter, ken_burns_gpu_filter, motion_rate
 from dramastill.media.particles import LOOP_SECONDS
 from dramastill.media.resources import chunk_workers, encode_threads
 from dramastill.media.visualizer import BarRenderer, parse_color
@@ -143,7 +143,7 @@ def render_movie(
             log(
                 "info",
                 "Кодирование: NVIDIA NVENC. Зум и сдвиг кадра считает видеокарта. "
-                "Виньетка, искры и полоски остаются на процессоре: у них нет фильтра CUDA.",
+                "Виньетка, искры и полоски остаются на процессоре.",
             )
         elif cache.get("cuda_filters"):
             log(
@@ -154,7 +154,7 @@ def render_movie(
         elif allow_nvenc(settings):
             log(
                 "info",
-                "Кодирование: NVIDIA NVENC. Зум остаётся на процессоре: видеокарта не приняла фильтр CUDA.",
+                "Кодирование: NVIDIA NVENC. Зум остаётся на процессоре: видеокарта не приняла Vulkan.",
             )
         else:
             log("info", "Кодирование фрагментов на процессоре")
@@ -289,8 +289,6 @@ def _render_chunk(
     origin = int(round(start_frame * drawn / fps))
     cuda = bool(cache.get("cuda_filters"))
     inputs = [ffmpeg, "-y"]
-    if cuda:
-        inputs.extend(["-init_hw_device", "cuda=gpu:0", "-filter_hw_device", "gpu"])
     inputs.extend(
         [
         "-hide_banner",
@@ -342,7 +340,7 @@ def _render_chunk(
     graph = _filter_graph(
         settings=settings,
         motion=ken_burns_filter(settings, origin, drawn, width, height),
-        cuda_motion=ken_burns_cuda_graph(settings, origin, drawn, width, height) if cuda else "",
+        cuda_motion=ken_burns_gpu_filter(settings, origin, drawn, width, height) if cuda else "",
         drawn=drawn,
         fps=fps,
         width=width,
@@ -398,7 +396,7 @@ def _render_chunk(
     try:
         run_ffmpeg(cmd, frame_iter=make_frames(), token=token, on_progress=on_progress)
     except FFmpegError:
-        if cuda and _command_uses_cuda(cmd):
+        if cuda and _command_uses_gpu(cmd):
             cache["cuda_filters"] = False
             if log is not None:
                 log("warning", "Видеокарта не приняла зум, фрагмент считается на процессоре")
@@ -433,8 +431,10 @@ def _replace_video_codec(cmd: list[str], video_args: list[str]) -> list[str]:
     return cmd[:start] + video_args + cmd[end:]
 
 
-def _command_uses_cuda(cmd: list[str]) -> bool:
-    return "-init_hw_device" in cmd
+def _command_uses_gpu(cmd: list[str]) -> bool:
+    if "-filter_complex" not in cmd:
+        return False
+    return "libplacebo=" in cmd[cmd.index("-filter_complex") + 1]
 
 
 def _without_cuda(
@@ -495,20 +495,23 @@ def _filter_graph(
     visual_height: int,
     cuda_motion: str = "",
 ) -> str:
-    if cuda_motion:
-        filters = ["[moved]"]
-        head = [f"[0:v]{cuda_motion}[moved]"]
-    else:
-        filters = [f"[0:v]{motion}"]
-        head = []
+    tail: list[str] = []
     if settings.vignette > 0.01:
         angle = min(1.2, max(0.05, settings.vignette))
-        filters.append(f"vignette=PI*{angle:.3f}")
+        tail.append(f"vignette=PI*{angle:.3f}")
     if abs(settings.grade_contrast - 1) > 0.001 or abs(settings.grade_saturation - 1) > 0.001:
-        filters.append(f"eq=contrast={settings.grade_contrast:.3f}:saturation={settings.grade_saturation:.3f}")
-    filters.append("format=gbrp[base]" if particle_index is not None else f"fps={fps},format=yuv420p[base]")
+        tail.append(f"eq=contrast={settings.grade_contrast:.3f}:saturation={settings.grade_saturation:.3f}")
+    tail.append("format=gbrp[base]" if particle_index is not None else f"fps={fps},format=yuv420p[base]")
+    if cuda_motion:
+        # The label must sit against the next filter. A comma here makes
+        # ffmpeg reject the graph, and every chunk falls back to the CPU.
+        head = [f"[0:v]{cuda_motion}[moved]"]
+        chain = "[moved]" + ",".join(tail)
+    else:
+        head = []
+        chain = f"[0:v]{motion}," + ",".join(tail)
     current = "[base]"
-    parts = [*head, ",".join(filters)]
+    parts = [*head, chain]
     if particle_index is not None:
         parts.append(
             f"[{particle_index}:v]fps={drawn},scale={width}:{height}:flags=bilinear,format=gbrp[par]"

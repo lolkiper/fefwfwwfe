@@ -83,6 +83,29 @@ def uses_pollinations(settings: AppSettings, secrets: SecretStore) -> bool:
     return settings.llm.provider == "llm7" and not secrets.get("llm")
 
 
+def picture_model(settings: AppSettings) -> str:
+    chosen = (settings.image.writer_model or "").strip()
+    if chosen:
+        return chosen
+    if _uses_tokenlavka(settings) and (settings.llm.model or "").strip():
+        return settings.llm.model.strip()
+    return "economy"
+
+
+def build_picture_llm(settings: AppSettings, secrets: SecretStore, story_llm: LLMProvider):
+    """Модель, которая пишет промпт кадра и текст превью. Картинку рисует другой сервис."""
+    if (settings.image.writer or "tokenlavka") == "story":
+        return story_llm
+    key = (secrets.get("llm") or "").strip() or (secrets.get("image") or "").strip()
+    if not key:
+        return None
+    return OpenAICompatLLM(
+        base_url="https://tokenlavka.com/v1",
+        api_key=key,
+        model=picture_model(settings),
+    )
+
+
 def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     if uses_pollinations(settings, secrets):
         story = "История: Pollinations GPT-OSS 20B, без ключа и без дневного лимита"
@@ -101,9 +124,13 @@ def describe_route(settings: AppSettings, secrets: SecretStore) -> str:
     else:
         story = f"История: {settings.llm.provider} {settings.llm.model}"
     if settings.image.provider == "flux":
-        picture = "картинка: FLUX.1 Schnell"
+        drawn = "FLUX.1 Schnell"
     else:
-        picture = f"картинка: {settings.image.provider} {settings.image.model}"
+        drawn = f"{settings.image.provider} {settings.image.model}"
+    if (settings.image.writer or "tokenlavka") == "story":
+        picture = f"фото и превью пишет модель истории, рисует {drawn}"
+    else:
+        picture = f"фото и превью пишет Tokenlavka {picture_model(settings)}, рисует {drawn}"
     if settings.voice.provider == "edge":
         voice = "голос: Edge Neural"
     else:

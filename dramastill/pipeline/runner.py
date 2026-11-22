@@ -22,7 +22,7 @@ from dramastill.media.image_service import ensure_chapter_images
 from dramastill.media.particles import ensure_particles
 from dramastill.media.thumbnail import compose_thumbnail
 from dramastill.media.tts_service import ChapterAudioPrefetch, chapter_time_spans, ensure_narration_audio
-from dramastill.providers.factory import Providers, build_providers, describe_route
+from dramastill.providers.factory import Providers, build_picture_llm, build_providers, describe_route
 from dramastill.story.service import ensure_metadata, ensure_story
 from dramastill.util import format_clock, now_iso, safe_filename
 
@@ -67,6 +67,9 @@ def run_project(
     try:
         ffmpeg, ffprobe = resolve_ffmpeg(settings.video)
         active = providers or build_providers(settings, secrets)
+        picture_llm = build_picture_llm(settings, secrets, active.llm)
+        if (settings.image.writer or "tokenlavka") != "story" and picture_llm is None:
+            log("warning", "Для Tokenlavka нет ключа, описание кадра и превью собираются на месте")
         log("info", describe_route(settings, secrets))
         cooling = cooling_decision(settings.video)
         log("info", cooling.summary)
@@ -76,7 +79,7 @@ def run_project(
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
             f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
             "Главы и проверка идут до 4 одновременно, озвучка до 6. "
-            "На каждую главу своя картинка. Движение через scale и crop, на видеокарте если она принимает CUDA, без zoompan. "
+            "На каждую главу своя картинка. Движение через scale и crop, на видеокарте через Vulkan если она его принимает, без zoompan. "
             "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
         story_path = work / "story.json"
@@ -129,6 +132,7 @@ def run_project(
             settings=settings,
             story=story,
             active=active,
+            picture_llm=picture_llm,
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
             work=work,
@@ -235,7 +239,7 @@ def run_project(
         raise
 
 
-def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log, progress):
+def _prepare_media(*, settings, story, active, picture_llm, ffmpeg, ffprobe, work, token, log, progress):
     parallel = settings.video.performance_mode != "low" and settings.video.render_mode != "low_resource"
 
     def do_image():
@@ -248,6 +252,7 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
             directory=work / "images",
             log=log,
             token=token,
+            llm=picture_llm,
         )
 
     def do_audio():
@@ -269,7 +274,7 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
         token.check()
         return ensure_metadata(
             story=story,
-            llm=active.llm,
+            llm=picture_llm or active.llm,
             path=work / "youtube.json",
             settings=settings.story,
             temperature=settings.llm.temperature,

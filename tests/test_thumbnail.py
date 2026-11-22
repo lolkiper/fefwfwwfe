@@ -73,6 +73,48 @@ def test_thumbnail_image_carries_yellow_and_red(tmp_path):
     assert sum(top.resize((1, 1)).getpixel((0, 0))) > 40
 
 
+def test_tokenlavka_writes_the_shot_and_a_failure_stays_local():
+    from dramastill.providers.base import LLMResult
+    from dramastill.story.picture_copy import write_shot
+
+    class Writer:
+        model = "economy"
+
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            return LLMResult('{"prompt": "A clothed woman of 34 in a grey coat holds a will in a dim kitchen, one camera, no text."}')
+
+    story = {"characters": [{"name": "Марина", "age": 34, "appearance": "dark hair, oval face, tired eyes, light olive skin, slim build", "wardrobe": "grey coat"}], "dramatic_moment": "kitchen"}
+    chapter = {"summary": "Она находит завещание."}
+    settings = __import__("dramastill.config.defaults", fromlist=["ImageSettings"]).ImageSettings()
+    notes = []
+    prompt = write_shot(Writer(), story, chapter, settings, 1, 2, lambda *_args: notes.append(_args))
+    assert "grey coat" in prompt
+    assert "no text" in prompt.lower()
+    assert notes and notes[0][0] == "info"
+
+    class Broken:
+        model = "economy"
+
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            return LLMResult("не json")
+
+    fallback = write_shot(Broken(), story, chapter, settings, 2, 2, lambda *_args: notes.append(_args))
+    assert "Single photorealistic" in fallback
+    assert notes[-1][0] == "warning"
+
+
+def test_picture_model_follows_the_story_until_it_is_changed():
+    from dramastill.config.defaults import AppSettings
+    from dramastill.providers.factory import picture_model
+
+    settings = AppSettings()
+    settings.llm.provider = "tokenlavka"
+    settings.llm.model = "claude-fable-5-1"
+    assert picture_model(settings) == "claude-fable-5-1"
+    settings.image.writer_model = "economy"
+    assert picture_model(settings) == "economy"
+
+
 def test_metadata_prompt_asks_for_the_poster():
     text = metadata_prompt({"title": "Дом", "logline": "Продажа"}, "Невестка узнала.", "Language: Russian.")
     assert "thumbnail_lines" in text

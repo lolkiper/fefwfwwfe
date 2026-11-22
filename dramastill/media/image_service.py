@@ -11,7 +11,8 @@ from dramastill.config.defaults import ImageSettings
 from dramastill.providers.base import ImageProvider
 from dramastill.providers.errors import ProviderError
 from dramastill.providers.image import bind_image_log, bind_image_stop, take_image_note
-from dramastill.story.image_prompt import build_chapter_image_prompt, build_image_prompt
+from dramastill.story.image_prompt import build_image_prompt
+from dramastill.story.picture_copy import write_shot
 
 
 def valid_image(path: Path) -> bool:
@@ -70,6 +71,7 @@ def ensure_chapter_images(
     directory: Path,
     log,
     token: CancelToken | None = None,
+    llm=None,
 ) -> list[Path]:
     """Ровно одно изображение на главу. Повтор при ошибке касается только этого кадра."""
     chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
@@ -81,15 +83,23 @@ def ensure_chapter_images(
     for offset, chapter in enumerate(chapters, start=1):
         number = int(chapter.get("index") or offset)
         dest = directory / f"chapter_{number:02d}.png"
-        prompt = build_chapter_image_prompt(story, chapter, settings, number, total)
-        jobs.append((number, dest, prompt))
+        jobs.append((number, dest, chapter))
+    if llm is not None and hasattr(llm, "stop_check") and token is not None:
+        llm.stop_check = token.check
+    writer = getattr(llm, "model", "") or ""
+    if writer:
+        log("info", f"Описание кадров пишет {writer}. Рисует их сервис картинок.")
 
-    def produce(number: int, dest: Path, prompt: str, suffix: str = "", force: bool = False) -> None:
+    def produce(number: int, dest: Path, chapter: dict, suffix: str = "", force: bool = False) -> None:
         prompt_path = dest.with_suffix(".prompt.txt")
         stored = prompt_path.read_text(encoding="utf-8") if prompt_path.exists() else ""
-        if not force and valid_image(dest) and stored.strip() == prompt.strip():
+        if not force and valid_image(dest) and stored.strip():
             log("info", f"Глава {number}: изображение уже есть и повторно не генерируется")
             return
+        if force and stored.strip():
+            prompt = stored + suffix
+        else:
+            prompt = write_shot(llm, story, chapter, settings, number, total, log) + suffix
         last: Exception | None = None
         bind_image_log(log)
         if token is not None:
@@ -101,7 +111,7 @@ def ensure_chapter_images(
                 partial.unlink()
             try:
                 provider.generate(
-                    prompt=prompt + suffix,
+                    prompt=prompt,
                     dest=partial,
                     size=settings.size or "1792x1024",
                     seed=None if settings.seed < 0 else settings.seed + number,
@@ -158,6 +168,8 @@ def _reject_duplicate_stills(jobs: list[tuple[int, Path, str]], produce, log) ->
             log("info", f"Глава {number}: кадр уникален")
             continue
         log("warning", f"Глава {number}: кадр совпал с главой {previous}, запрашиваю другой ракурс")
+        prompt_file = dest.with_suffix(".prompt.txt")
+        kept = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else ""
         produce(
             number,
             dest,
@@ -165,9 +177,8 @@ def _reject_duplicate_stills(jobs: list[tuple[int, Path, str]], produce, log) ->
             "\nDifferent camera height, different gesture, different background detail. Do not repeat the earlier still.",
             True,
         )
-        prompt_file = dest.with_suffix(".prompt.txt")
-        if prompt_file.exists():
-            prompt_file.write_text(prompt, encoding="utf-8")
+        if kept.strip():
+            prompt_file.write_text(kept, encoding="utf-8")
         again = _file_hash(dest) if valid_image(dest) else ""
         if again and again != digest and again not in seen:
             seen[again] = number

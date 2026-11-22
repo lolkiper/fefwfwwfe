@@ -181,11 +181,11 @@ def test_chunk_moves_the_zoom_on_the_gpu_when_cuda_is_available(tmp_path, monkey
         on_fraction=lambda _value: None,
     )
     command = commands[0]
-    assert command[command.index("-init_hw_device") + 1] == "cuda=gpu:0"
+    assert "-init_hw_device" not in command
     graph = command[command.index("-filter_complex") + 1]
-    assert "scale_cuda" in graph
-    assert "overlay_cuda" in graph
-    assert "hwdownload" in graph
+    assert "libplacebo=" in graph
+    assert "crop_w=" in graph
+    assert "[moved]," not in graph
     assert "zoompan" not in graph
 
 
@@ -196,8 +196,8 @@ def test_failed_gpu_zoom_falls_back_to_the_cpu_crop(tmp_path, monkeypatch):
 
     def capture(cmd, **_kwargs):
         commands.append(cmd)
-        if "scale_cuda" in cmd[cmd.index("-filter_complex") + 1]:
-            raise FFmpegError("cuda")
+        if "libplacebo=" in cmd[cmd.index("-filter_complex") + 1]:
+            raise FFmpegError("gpu")
 
     monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
     monkeypatch.setattr(
@@ -229,9 +229,9 @@ def test_failed_gpu_zoom_falls_back_to_the_cpu_crop(tmp_path, monkeypatch):
         on_fraction=lambda _value: None,
     )
     assert cache["cuda_filters"] is False
-    assert "scale_cuda" in commands[0][commands[0].index("-filter_complex") + 1]
+    assert "libplacebo=" in commands[0][commands[0].index("-filter_complex") + 1]
     fallback = commands[1][commands[1].index("-filter_complex") + 1]
-    assert "scale_cuda" not in fallback
+    assert "libplacebo=" not in fallback
     assert "crop=" in fallback
     assert "-init_hw_device" not in commands[1]
     assert notes
