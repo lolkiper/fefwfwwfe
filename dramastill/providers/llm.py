@@ -194,9 +194,10 @@ class OpenAICompatLLM:
             initial_reasoning = "low" if self._short_reasoning() else None
             return once(json_mode, "max_tokens", initial_reasoning, max_tokens)
 
+        hosted = "tokenlavka.com" in self.base_url.lower()
         return with_retries(
             attempt,
-            attempts=8,
+            attempts=4 if hosted else 8,
             on_wait=self.on_wait,
             stop_check=self.stop_check,
         )

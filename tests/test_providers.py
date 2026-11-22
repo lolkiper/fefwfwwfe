@@ -559,6 +559,24 @@ def test_tokenlavka_balance_reads_the_cabinet_remainder():
     assert secret not in label
 
 
+def test_a_retry_without_a_deadline_does_not_double_the_pause(monkeypatch):
+    from dramastill.providers.retry import with_retries
+
+    slept: list[float] = []
+    notes: list[str] = []
+    monkeypatch.setattr("dramastill.providers.retry.time.sleep", lambda seconds: slept.append(seconds))
+
+    def action():
+        raise ProviderError("Ошибка API (429): слишком много запросов", status=429, retryable=True)
+
+    with pytest.raises(ProviderError):
+        with_retries(action, attempts=5, on_wait=notes.append)
+    assert slept
+    assert max(slept) <= 6.4
+    assert "429" in notes[0]
+    assert "26" not in notes[-1]
+
+
 def test_factory_uses_edge_without_key(tmp_path):
     settings = AppSettings()
     settings.voice.provider = "edge"
