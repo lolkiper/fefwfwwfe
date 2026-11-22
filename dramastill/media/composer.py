@@ -11,11 +11,12 @@ from dramastill.cancel import CancelToken
 from dramastill.config.defaults import VideoSettings
 from dramastill.media.ffmpeg_util import (
     FFmpegError,
+    cuda_motion_works,
     encoder_args,
     probe,
     run_ffmpeg,
 )
-from dramastill.media.motion import ken_burns_filter, motion_rate
+from dramastill.media.motion import ken_burns_cuda_graph, ken_burns_filter, motion_rate
 from dramastill.media.particles import LOOP_SECONDS
 from dramastill.media.resources import chunk_workers, encode_threads
 from dramastill.media.visualizer import BarRenderer, parse_color
@@ -116,6 +117,7 @@ def render_movie(
         encoding="utf-8",
     )
     cache: dict = {}
+    cache["cuda_filters"] = cuda_motion_works(ffmpeg, cache)
     paths: list[Path | None] = [None] * len(slices)
     jobs: list[tuple[int, int, int, Path, float, Path]] = []
     for index, (start, count, still) in enumerate(slices):
@@ -137,11 +139,22 @@ def render_movie(
     if jobs:
         from dramastill.media.resources import allow_nvenc
 
-        if allow_nvenc(settings):
+        if cache.get("cuda_filters") and allow_nvenc(settings):
             log(
                 "info",
-                "Кодирование: NVIDIA NVENC. Плавный масштаб и crop остаются на процессоре, "
-                "потому что у покадрового движения нет фильтра CUDA.",
+                "Кодирование: NVIDIA NVENC. Зум и сдвиг кадра считает видеокарта. "
+                "Виньетка, искры и полоски остаются на процессоре: у них нет фильтра CUDA.",
+            )
+        elif cache.get("cuda_filters"):
+            log(
+                "info",
+                "Зум и сдвиг кадра считает видеокарта. Кодирование фрагментов на процессоре. "
+                "Виньетка, искры и полоски тоже остаются на процессоре.",
+            )
+        elif allow_nvenc(settings):
+            log(
+                "info",
+                "Кодирование: NVIDIA NVENC. Зум остаётся на процессоре: видеокарта не приняла фильтр CUDA.",
             )
         else:
             log("info", "Кодирование фрагментов на процессоре")
@@ -169,6 +182,7 @@ def render_movie(
                 token=token,
                 cache=cache,
                 threads=threads,
+                log=log,
                 on_fraction=lambda fraction, index=index: progress((done + fraction) / len(slices)),
             )
         except Exception:
@@ -265,6 +279,7 @@ def _render_chunk(
     cache: dict,
     on_fraction,
     threads: int = 0,
+    log=None,
 ) -> None:
     fps = max(8, int(settings.fps))
     drawn = motion_rate(fps)
@@ -272,9 +287,12 @@ def _render_chunk(
     width = even(settings.width)
     height = even(settings.height)
     origin = int(round(start_frame * drawn / fps))
-    inputs = [
-        ffmpeg,
-        "-y",
+    cuda = bool(cache.get("cuda_filters"))
+    inputs = [ffmpeg, "-y"]
+    if cuda:
+        inputs.extend(["-init_hw_device", "cuda=gpu:0", "-filter_hw_device", "gpu"])
+    inputs.extend(
+        [
         "-hide_banner",
         "-loglevel",
         "error",
@@ -290,7 +308,8 @@ def _render_chunk(
         str(drawn),
         "-i",
         str(image),
-    ]
+        ]
+    )
     particle_index = None
     next_index = 1
     if particles is not None:
@@ -323,6 +342,7 @@ def _render_chunk(
     graph = _filter_graph(
         settings=settings,
         motion=ken_burns_filter(settings, origin, drawn, width, height),
+        cuda_motion=ken_burns_cuda_graph(settings, origin, drawn, width, height) if cuda else "",
         drawn=drawn,
         fps=fps,
         width=width,
@@ -378,6 +398,16 @@ def _render_chunk(
     try:
         run_ffmpeg(cmd, frame_iter=make_frames(), token=token, on_progress=on_progress)
     except FFmpegError:
+        if cuda and _command_uses_cuda(cmd):
+            cache["cuda_filters"] = False
+            if log is not None:
+                log("warning", "Видеокарта не приняла зум, фрагмент считается на процессоре")
+            cpu_cmd = _without_cuda(cmd, settings, origin, drawn, fps, width, height, duration, audio_index, particle_index, visual_index, visual_height)
+            try:
+                run_ffmpeg(cpu_cmd, frame_iter=make_frames(), token=token, on_progress=on_progress)
+                return
+            except FFmpegError:
+                cmd = cpu_cmd
         if "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "h264_nvenc":
             cache["nvenc"] = False
             soft = [
@@ -403,6 +433,53 @@ def _replace_video_codec(cmd: list[str], video_args: list[str]) -> list[str]:
     return cmd[:start] + video_args + cmd[end:]
 
 
+def _command_uses_cuda(cmd: list[str]) -> bool:
+    return "-init_hw_device" in cmd
+
+
+def _without_cuda(
+    cmd: list[str],
+    settings: VideoSettings,
+    origin: int,
+    drawn: int,
+    fps: int,
+    width: int,
+    height: int,
+    duration: float,
+    audio_index: int,
+    particle_index: int | None,
+    visual_index: int | None,
+    visual_height: int,
+) -> list[str]:
+    cleaned = []
+    skip = 0
+    for item in cmd:
+        if skip:
+            skip -= 1
+            continue
+        if item in {"-init_hw_device", "-filter_hw_device"}:
+            skip = 1
+            continue
+        cleaned.append(item)
+    graph = _filter_graph(
+        settings=settings,
+        motion=ken_burns_filter(settings, origin, drawn, width, height),
+        cuda_motion="",
+        drawn=drawn,
+        fps=fps,
+        width=width,
+        height=height,
+        duration=duration,
+        audio_index=audio_index,
+        particle_index=particle_index,
+        visual_index=visual_index,
+        visual_height=visual_height,
+    )
+    if "-filter_complex" in cleaned:
+        cleaned[cleaned.index("-filter_complex") + 1] = graph
+    return cleaned
+
+
 def _filter_graph(
     *,
     settings: VideoSettings,
@@ -416,8 +493,14 @@ def _filter_graph(
     particle_index: int | None,
     visual_index: int | None,
     visual_height: int,
+    cuda_motion: str = "",
 ) -> str:
-    filters = [f"[0:v]{motion}"]
+    if cuda_motion:
+        filters = ["[moved]"]
+        head = [f"[0:v]{cuda_motion}[moved]"]
+    else:
+        filters = [f"[0:v]{motion}"]
+        head = []
     if settings.vignette > 0.01:
         angle = min(1.2, max(0.05, settings.vignette))
         filters.append(f"vignette=PI*{angle:.3f}")
@@ -425,7 +508,7 @@ def _filter_graph(
         filters.append(f"eq=contrast={settings.grade_contrast:.3f}:saturation={settings.grade_saturation:.3f}")
     filters.append("format=gbrp[base]" if particle_index is not None else f"fps={fps},format=yuv420p[base]")
     current = "[base]"
-    parts = [",".join(filters)]
+    parts = [*head, ",".join(filters)]
     if particle_index is not None:
         parts.append(
             f"[{particle_index}:v]fps={drawn},scale={width}:{height}:flags=bilinear,format=gbrp[par]"

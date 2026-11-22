@@ -294,6 +294,45 @@ def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict, threads: int
     ]
 
 
+def cuda_motion_works(ffmpeg: str, cache: dict) -> bool:
+    """True when this ffmpeg can zoom a frame on the NVIDIA card."""
+
+    with _NVENC_LOCK:
+        if "cuda_filters" in cache:
+            return bool(cache["cuda_filters"])
+        cmd = [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-init_hw_device",
+            "cuda=gpu:0",
+            "-filter_hw_device",
+            "gpu",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.1:r=8",
+            "-filter_complex",
+            (
+                "[0:v]format=nv12,hwupload_cuda,scale_cuda=48:40:eval=frame:interp_algo=bilinear[zoomed];"
+                "color=c=black:s=32x24:r=8,format=nv12,hwupload_cuda[canvas];"
+                "[canvas][zoomed]overlay_cuda=x='-n':y=0:eval=frame:shortest=1,hwdownload,format=yuv420p"
+            ),
+            "-frames:v",
+            "1",
+            "-f",
+            "null",
+            "-",
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, timeout=20, **subprocess_kwargs())
+            cache["cuda_filters"] = result.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            cache["cuda_filters"] = False
+        return bool(cache["cuda_filters"])
+
+
 def nvenc_works(ffmpeg: str, cache: dict) -> bool:
     with _NVENC_LOCK:
         return _nvenc_works(ffmpeg, cache)

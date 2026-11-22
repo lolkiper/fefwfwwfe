@@ -148,6 +148,95 @@ def test_chunk_command_does_not_queue_the_visualizer_input(tmp_path, monkeypatch
     assert graph.count("blend=all_mode=screen") == 1
 
 
+def test_chunk_moves_the_zoom_on_the_gpu_when_cuda_is_available(tmp_path, monkeypatch):
+    commands = []
+
+    def capture(cmd, **_kwargs):
+        commands.append(cmd)
+
+    monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
+    monkeypatch.setattr(
+        "dramastill.media.composer.encoder_args",
+        lambda *_args, **_kwargs: ["-c:v", "h264_nvenc", "-preset", "p4", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+    )
+    settings = VideoSettings()
+    settings.width = 640
+    settings.height = 360
+    settings.fps = 30
+    settings.visualizer = False
+    from dramastill.media.composer import _render_chunk
+
+    _render_chunk(
+        ffmpeg="ffmpeg",
+        image=tmp_path / "still.png",
+        audio=tmp_path / "voice.wav",
+        particles=None,
+        bands=None,
+        dest=tmp_path / "chunk.mkv",
+        settings=settings,
+        start_frame=30,
+        frames=8,
+        token=CancelToken(),
+        cache={"cuda_filters": True},
+        on_fraction=lambda _value: None,
+    )
+    command = commands[0]
+    assert command[command.index("-init_hw_device") + 1] == "cuda=gpu:0"
+    graph = command[command.index("-filter_complex") + 1]
+    assert "scale_cuda" in graph
+    assert "overlay_cuda" in graph
+    assert "hwdownload" in graph
+    assert "zoompan" not in graph
+
+
+def test_failed_gpu_zoom_falls_back_to_the_cpu_crop(tmp_path, monkeypatch):
+    from dramastill.media.ffmpeg_util import FFmpegError
+
+    commands = []
+
+    def capture(cmd, **_kwargs):
+        commands.append(cmd)
+        if "scale_cuda" in cmd[cmd.index("-filter_complex") + 1]:
+            raise FFmpegError("cuda")
+
+    monkeypatch.setattr("dramastill.media.composer.run_ffmpeg", capture)
+    monkeypatch.setattr(
+        "dramastill.media.composer.encoder_args",
+        lambda *_args, **_kwargs: ["-c:v", "libx264", "-preset", "ultrafast", "-b:v", "1M", "-pix_fmt", "yuv420p"],
+    )
+    settings = VideoSettings()
+    settings.width = 640
+    settings.height = 360
+    settings.fps = 12
+    settings.visualizer = False
+    notes = []
+    from dramastill.media.composer import _render_chunk
+
+    cache = {"cuda_filters": True}
+    _render_chunk(
+        ffmpeg="ffmpeg",
+        image=tmp_path / "still.png",
+        audio=tmp_path / "voice.wav",
+        particles=None,
+        bands=None,
+        dest=tmp_path / "chunk.mkv",
+        settings=settings,
+        start_frame=0,
+        frames=4,
+        token=CancelToken(),
+        cache=cache,
+        log=lambda *_args: notes.append(_args),
+        on_fraction=lambda _value: None,
+    )
+    assert cache["cuda_filters"] is False
+    assert "scale_cuda" in commands[0][commands[0].index("-filter_complex") + 1]
+    fallback = commands[1][commands[1].index("-filter_complex") + 1]
+    assert "scale_cuda" not in fallback
+    assert "crop=" in fallback
+    assert "-init_hw_device" not in commands[1]
+    assert notes
+
+
 def test_single_image_moves_and_bars_follow_voice(tmp_path):
     image = tmp_path / "still.png"
     audio = tmp_path / "voice.wav"

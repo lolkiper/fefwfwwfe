@@ -76,7 +76,7 @@ def run_project(
             f"{_mode_label(settings.video.performance_mode)}, монтаж {_render_label(settings.video.render_mode)}. "
             f"Проектов сразу до {project_slots(settings.video)}, фрагментов видео сразу до {chunk_workers(settings.video)}. "
             "Главы и проверка идут до 4 одновременно, озвучка до 6. "
-            "На каждую главу своя картинка. Движение через scale и crop, без zoompan. "
+            "На каждую главу своя картинка. Движение через scale и crop, на видеокарте если она принимает CUDA, без zoompan. "
             "Готовые фрагменты склеиваются без повторного кодирования видео.",
         )
         story_path = work / "story.json"
