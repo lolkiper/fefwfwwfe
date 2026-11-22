@@ -11,6 +11,8 @@
 
 const fs = require('fs');
 const path = require('path');
+const https = require('https');
+const zlib = require('zlib');
 const { spawn } = require('child_process');
 
 const {
@@ -39,8 +41,9 @@ const DEFAULT_VIDEO_COUNT = 1;
 const DEFAULT_CHANNEL_CONCURRENCY = 2;
 const MAX_CHANNEL_CONCURRENCY = 6;
 const PROBE_CONCURRENCY = 2;
-/** Больше этого числа роликов без длительности по одному не проверяем: иначе сбор замирает. */
-const MAX_INLINE_PROBES = 8;
+/** Сколько страниц Shorts читать одновременно. Это лёгкие запросы, не отдельные yt-dlp. */
+const DURATION_CONCURRENCY = 6;
+const DURATION_TIMEOUT_MS = 12_000;
 /** Один зависший yt-dlp не должен держать весь сбор. */
 const PLAYLIST_TIMEOUT_MS = 50_000;
 /** Сколько роликов подряд старше даты нужно увидеть, чтобы остановить просмотр списка. */
@@ -208,6 +211,18 @@ function appendNewLinks(file, urls) {
   fs.appendFileSync(file, `${prefix}${urls.join('\n')}\n`, 'utf8');
 }
 
+function durationFromShortsPage(html) {
+  const text = String(html || '');
+  const length = text.match(/lengthSeconds\\?"\s*:\s*\\?"(\d+)/);
+  const dated = text.match(/uploadDate\\?"\s+content=\\?"(\d{4}-\d{2}-\d{2})/)
+    || text.match(/uploadDate\\?"\s*:\s*\\?"(\d{4}-\d{2}-\d{2})/);
+  const duration = length ? Number(length[1]) : null;
+  return {
+    duration: Number.isFinite(duration) && duration > 0 ? duration : null,
+    uploadDate: dated ? dated[1].replace(/-/g, '') : null
+  };
+}
+
 function durationSeconds(entry) {
   if (!entry || typeof entry !== 'object') return null;
   if (entry.duration != null && entry.duration !== '') {
@@ -305,6 +320,7 @@ class ChannelCollector {
     this.outputDir = options.outputDir;
     this.ytdlpPath = options.ytdlpPath || resolveYtDlpPath();
     this.runner = options.runner || null;
+    this.durationLookup = options.durationLookup || null;
     this.hooks = options.hooks || {};
     this.count = normalizeVideoCount(options.count);
     this.since = normalizeSinceDate(options.since);
@@ -317,6 +333,8 @@ class ChannelCollector {
     this._lock = Promise.resolve();
     this._probeActive = 0;
     this._probeWaiters = [];
+    this._durationActive = 0;
+    this._durationWaiters = [];
     this.cookiesFromBrowser = null;
   }
 
@@ -520,6 +538,103 @@ class ChannelCollector {
     }
   }
 
+  async withDurationSlot(fn) {
+    while (this._durationActive >= DURATION_CONCURRENCY) {
+      await new Promise((resolve) => {
+        this._durationWaiters.push(resolve);
+      });
+      if (this.stopped) return undefined;
+    }
+    this._durationActive += 1;
+    try {
+      return await fn();
+    } finally {
+      this._durationActive -= 1;
+      const next = this._durationWaiters.shift();
+      if (next) next();
+    }
+  }
+
+  readShortPage(videoId) {
+    return this.readUrl(`https://m.youtube.com/shorts/${encodeURIComponent(videoId)}`, 4);
+  }
+
+  readUrl(url, redirectsLeft) {
+    return new Promise((resolve, reject) => {
+      if (this.stopped) {
+        const err = new Error('Сбор ссылок остановлен');
+        err.cancelled = true;
+        reject(err);
+        return;
+      }
+      const req = https.get(url, {
+        family: 4,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
+          'Accept-Language': 'en',
+          'Accept-Encoding': 'gzip'
+        }
+      }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location && redirectsLeft > 0) {
+          res.resume();
+          this.readUrl(new URL(res.headers.location, url).href, redirectsLeft - 1).then(resolve, reject);
+          return;
+        }
+        const stream = res.headers['content-encoding'] === 'gzip' ? res.pipe(zlib.createGunzip()) : res;
+        const chunks = [];
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('error', reject);
+        stream.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+      });
+      req.setTimeout(DURATION_TIMEOUT_MS, () => req.destroy(new Error('timeout')));
+      req.on('error', reject);
+    });
+  }
+
+  async lookupDuration(video) {
+    if (typeof this.durationLookup === 'function') return this.durationLookup(video);
+    if (this.runner) return this.probeVideo(video.url);
+    const html = await this.readShortPage(video.id);
+    return durationFromShortsPage(html);
+  }
+
+  async fillDurations(videos, channelUrl) {
+    const pending = videos.filter((video) => video.duration == null);
+    if (!pending.length || this.stopped) return;
+    let done = 0;
+    let misses = 0;
+    let gaveUp = false;
+    const total = pending.length;
+    this.log('info', `Проверяю длительность ${total} Shorts: ${channelUrl}`);
+    await Promise.all(pending.map((video) => this.withDurationSlot(async () => {
+      if (this.stopped || gaveUp || video.duration != null) return;
+      try {
+        const found = await this.lookupDuration(video);
+        if (found && video.duration == null && found.duration != null) video.duration = found.duration;
+        if (found && !video.uploadDate && found.uploadDate) video.uploadDate = found.uploadDate;
+        if (found && found.title && !video.title) video.title = found.title;
+        if (video.duration == null) misses += 1;
+        else misses = 0;
+        if (misses >= 8) {
+          gaveUp = true;
+          this.log('warn', `YouTube не отдал длительность, остальные ролики этого канала пропущены: ${channelUrl}`);
+        }
+      } catch (err) {
+        if ((err && err.cancelled) || this.stopped) throw err;
+        misses += 1;
+        if (misses >= 8) {
+          gaveUp = true;
+          this.log('warn', `YouTube не отдал длительность, остальные ролики этого канала пропущены: ${channelUrl}`);
+        }
+      } finally {
+        done += 1;
+        if (done === 1 || done === total || done % 25 === 0) {
+          this.log('info', `Длительность ${done}/${total}: ${channelUrl}`);
+        }
+      }
+    })));
+  }
+
   async probeMissing(videos) {
     const pending = videos.filter((video) => video.duration == null);
     for (let offset = 0; offset < pending.length && !this.stopped; offset += PROBE_CONCURRENCY) {
@@ -544,7 +659,7 @@ class ChannelCollector {
     let videos = videosFromPlaylist(info, limit);
     const missingDurations = videos.length - knownDurationCount(videos);
     const playlistUrl = shortsPlaylistUrl(channelKeyFrom(info, ''));
-    if (playlistUrl && (missingDurations > MAX_INLINE_PROBES || (this.since && videos.length < limit))) {
+    if (playlistUrl && (missingDurations > 0 || (this.since && videos.length < limit))) {
       try {
         const fullInfo = await this.fetchPlaylist(playlistUrl, limit);
         videos = preferRicherList(videos, videosFromPlaylist(fullInfo, limit));
@@ -573,15 +688,7 @@ class ChannelCollector {
         `С ${formatSinceDate(this.since)} взяты первые ${limit} роликов, более старые не проверялись: ${channelUrl}`
       );
     }
-    const pending = selected.filter((video) => video.duration == null);
-    if (pending.length > MAX_INLINE_PROBES) {
-      this.log(
-        'warn',
-        `У ${pending.length} Shorts нет длительности в списке — по одному их не проверяю, чтобы сбор не завис: ${channelUrl}`
-      );
-    } else if (pending.length) {
-      await this.probeMissing(pending);
-    }
+    await this.fillDurations(selected, channelUrl);
     if (this.since) {
       for (let index = selected.length - 1; index >= 0; index -= 1) {
         const video = selected[index];
@@ -748,7 +855,8 @@ module.exports = {
   DEFAULT_VIDEO_COUNT,
   DEFAULT_CHANNEL_CONCURRENCY,
   PROBE_CONCURRENCY,
-  MAX_INLINE_PROBES,
+  DURATION_CONCURRENCY,
+  durationFromShortsPage,
   knownDurationCount,
   preferRicherList,
   shortsPlaylistUrl,

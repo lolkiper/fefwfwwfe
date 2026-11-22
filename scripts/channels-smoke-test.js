@@ -17,6 +17,7 @@ const {
   MAX_SHORT_SECONDS,
   MIN_SHORT_SECONDS,
   MAX_SINCE_VIDEOS,
+  durationFromShortsPage,
   normalizeChannelUrl,
   parseChannelList,
   classifyFresh,
@@ -70,6 +71,10 @@ function main() {
   check(normalizeVideoCount(0) === 1 && normalizeVideoCount(99) === 50 && normalizeVideoCount('3') === 3, 'число роликов в диапазоне 1…50');
   check(MAX_SHORT_SECONDS === 150, 'порог короткого ролика — 2,5 минуты');
   check(MIN_SHORT_SECONDS === 35, 'короче 35 секунд Shorts не берётся');
+  const parsedPage = durationFromShortsPage(
+    'lengthSeconds":"178","channelId":"UC1" uploadDate" content="2026-11-20T10:10:29-08:00"'
+  );
+  check(parsedPage.duration === 178 && parsedPage.uploadDate === '20261120', 'страница Shorts отдаёт длительность и дату', JSON.stringify(parsedPage));
   check(normalizeSinceDate('2026-11-10') === '20261110', 'дата из календаря становится YYYYMMDD');
   check(normalizeSinceDate('10.11.2026') === '20261110', 'дата ДД.ММ.ГГГГ принимается');
   check(normalizeSinceDate('2026-02-31') === null, 'несуществующий день отвергается');
@@ -260,7 +265,7 @@ function main() {
     const parallelLines = fs.readFileSync(path.join(parallelDir, LINKS_FILE), 'utf8');
     check(parallelLines.includes('RIGHTSHORT1') && !parallelLines.includes('LEFTSHORT11'), 'короче 35 секунд не записан, подходящий записан');
 
-    console.log('\n8) Сотни роликов без длительности не открываются по одному…');
+    console.log('\n8) Длительность, которой нет в списке, всё равно находится…');
     const thickDir = path.join(ROOT, 'thick');
     fs.mkdirSync(thickDir, { recursive: true });
     let probes = 0;
@@ -294,7 +299,8 @@ function main() {
       runner: async (args) => {
         if (!args.includes('--flat-playlist')) {
           stuckProbes += 1;
-          return { stdout: '{}', stderr: '' };
+          const id = String(args[args.length - 1]).split('v=')[1] || 'XXXXXXXXXXX';
+          return { stdout: JSON.stringify({ id, duration: 48, upload_date: '20261112' }), stderr: '' };
         }
         if (String(args[args.length - 1]).includes('list=UUSH')) throw new Error('playlist unavailable');
         return playlist('UCstuck01', bare);
@@ -302,8 +308,8 @@ function main() {
     });
     const stuckSummary = await stuck.run('@Stuck');
     check(
-      stuckProbes === 0 && stuckSummary.links === 0 && stuckSummary.errors === 0 && stuckSummary.unknown === 12,
-      'если длительности нет у многих роликов, сбор заканчивается без проверки каждого',
+      stuckProbes === 12 && stuckSummary.links === 12 && stuckSummary.errors === 0,
+      'ролики без длительности в списке проверяются и записываются',
       JSON.stringify(stuckSummary)
     );
 
