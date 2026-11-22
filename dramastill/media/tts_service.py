@@ -94,7 +94,7 @@ def _narration_reusable(ffprobe: str, master: Path, stamp: Path, fingerprint: st
     if not info.has_audio or info.duration <= 0.3:
         return False
     if not stamp.exists():
-        return True
+        return False
     return stamp.read_text(encoding="utf-8").strip() == fingerprint
 
 

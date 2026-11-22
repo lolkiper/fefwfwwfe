@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import threading
 import time
@@ -35,10 +36,29 @@ def bind_image_log(log) -> None:
     _IMAGE_NOTE.log = log
 
 
+def bind_image_stop(check) -> None:
+    _IMAGE_NOTE.stop = check
+
+
 def _image_log(level: str, message: str) -> None:
     log = getattr(_IMAGE_NOTE, "log", None)
     if log is not None:
         log(level, message)
+
+
+def _stop() -> None:
+    check = getattr(_IMAGE_NOTE, "stop", None)
+    if check is not None:
+        check()
+
+
+def _wait(seconds: float) -> None:
+    remaining = min(50.0, max(0.0, seconds))
+    while remaining > 0.05:
+        _stop()
+        step = min(1.0, remaining)
+        time.sleep(step)
+        remaining -= step
 
 
 _NEGATIVE = (
@@ -59,8 +79,7 @@ class FluxSchnellImageProvider:
     def generate(self, *, prompt: str, dest: Path, size: str, seed: int | None) -> None:
         width, height = _flux_size(size)
         text = _clip_prompt(prompt)
-        chosen = 0 if seed is None or seed < 0 else int(seed) % 2147483647
-        randomize = seed is None or seed < 0
+        chosen, randomize = _chosen_seed(text, seed)
         if self._flux_blocked:
             note = _from_pollinations(_safe_still_prompt(text), dest, width, height, chosen, self._transport)
             _remember(note or "кадр взят с запасного адреса, FLUX недоступен")
@@ -260,11 +279,12 @@ def _from_pollinations(
     timeout = httpx.Timeout(90, connect=20)
     for _attempt in range(5):
         with _BACKUP_LOCK:
+            _stop()
             pause = _backup_not_before - time.monotonic()
             if pause > 0:
-                seconds = max(1, int(pause + 0.5))
+                seconds = max(1, int(min(pause, 50) + 0.5))
                 _image_log("info", f"Запасной адрес: одна картинка в 45 с, пауза {seconds} с")
-                time.sleep(min(pause, 50))
+                _wait(pause)
             try:
                 with httpx.Client(timeout=timeout, follow_redirects=True, transport=transport) as client:
                     response = client.get(
@@ -281,8 +301,12 @@ def _from_pollinations(
                 _backup_not_before = time.monotonic() + 5
                 continue
             if response.status_code < 400 and _looks_like_image(response.content):
-                _backup_not_before = time.monotonic() + 1
-                _write_png(response.content, dest)
+                try:
+                    _write_png(response.content, dest)
+                except Exception:
+                    _backup_not_before = time.monotonic() + 5
+                    continue
+                _backup_not_before = time.monotonic() + 45
                 return ""
             if response.status_code == 402 or b"FREE_LIMIT" in response.content[:400]:
                 delay = _retry_delay(response)
@@ -303,14 +327,27 @@ def _retry_delay(response: httpx.Response) -> float:
     return 45.0
 
 
+def _chosen_seed(prompt: str, seed: int | None) -> tuple[int, bool]:
+    """Случайный режим всё равно даёт разный запасной кадр на каждую главу."""
+    if seed is None or seed < 0:
+        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        return int(digest[:8], 16) % 2147483647 or 1, True
+    return int(seed) % 2147483647, False
+
+
 def _local_still(dest: Path, width: int, height: int, seed: int) -> None:
     from PIL import Image, ImageDraw
 
-    tone = seed % 9
-    image = Image.new("RGB", (width, height), (16 + tone * 3, 18, 24 + tone * 2))
+    value = int(seed) & 0x7FFFFFFF
+    tone = value % 180
+    image = Image.new("RGB", (width, height), (16 + tone % 40, 14 + (value // 7) % 28, 20 + (value // 19) % 32))
     draw = ImageDraw.Draw(image)
-    left = width // 6 + tone * 8
-    draw.ellipse((left, height // 7, left + width // 2, height * 2 // 3), fill=(64 + tone * 6, 54, 42))
+    span = max(8, width // 5)
+    left = (value % max(1, width - span))
+    top = ((value // 3) % max(1, height // 2))
+    draw.ellipse((left, top, left + span, top + span), fill=(60 + tone % 90, 46, 38 + value % 40))
+    mark = (value // 11) % max(1, width - 8)
+    draw.rectangle((mark, height // 3, mark + 18, min(height - 1, height // 3 + 70)), fill=(80, 60 + value % 50, 44))
     image.save(dest, "PNG")
 
 

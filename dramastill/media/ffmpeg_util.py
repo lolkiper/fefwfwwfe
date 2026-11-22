@@ -29,6 +29,7 @@ class MediaInfo:
 
 _ACTIVE: set[subprocess.Popen] = set()
 _ACTIVE_LOCK = threading.Lock()
+_NVENC_LOCK = threading.Lock()
 
 
 def subprocess_kwargs() -> dict:
@@ -294,6 +295,11 @@ def encoder_args(ffmpeg: str, settings: VideoSettings, cache: dict, threads: int
 
 
 def nvenc_works(ffmpeg: str, cache: dict) -> bool:
+    with _NVENC_LOCK:
+        return _nvenc_works(ffmpeg, cache)
+
+
+def _nvenc_works(ffmpeg: str, cache: dict) -> bool:
     if "nvenc" in cache:
         return bool(cache["nvenc"])
     cmd = [

@@ -1,6 +1,7 @@
 import base64
 import io
 import json
+import time
 
 import httpx
 import pytest
@@ -13,6 +14,21 @@ from dramastill.providers.factory import build_llm, build_providers, describe_ro
 from dramastill.providers.image import FluxSchnellImageProvider, OpenAIImageProvider, StabilityImageProvider
 from dramastill.providers.llm import AnthropicLLM, OpenAICompatLLM
 from dramastill.providers.tts import edge_prosody
+
+
+@pytest.fixture(autouse=True)
+def _reset_backup_image_gate():
+    import dramastill.providers.image as image
+
+    image._backup_not_before = 0.0
+    image.bind_image_stop(None)
+    yield
+    image._backup_not_before = 0.0
+    image.bind_image_stop(None)
+
+
+def time_in_future() -> float:
+    return time.monotonic() + 30
 
 
 def _png() -> bytes:
@@ -378,7 +394,63 @@ def test_backup_image_waits_out_the_free_limit(tmp_path, monkeypatch):
     finally:
         image._backup_not_before = 0.0
     assert dest.read_bytes() == payload
-    assert waits and waits[0] >= 20
+    assert sum(waits) >= 20
+
+
+def test_backup_images_use_a_different_seed_for_each_chapter(tmp_path, monkeypatch):
+    import dramastill.providers.image as image
+
+    monkeypatch.setattr(image.time, "sleep", lambda *_args: None)
+    payload = _png()
+    seeds: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "pollinations.ai" in str(request.url):
+            seeds.append(str(request.url.params.get("seed")))
+            return httpx.Response(200, content=payload, headers={"content-type": "image/png"})
+        if request.method == "POST":
+            return httpx.Response(200, json={"event_id": "evt"})
+        return httpx.Response(200, text="event: error\ndata: null\n\n")
+
+    provider = FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler))
+    for prompt in ("A quiet kitchen at night, chapter one", "A stairwell at dawn, chapter two"):
+        provider.generate(prompt=prompt, dest=tmp_path / f"{len(seeds)}.png", size="1280x720", seed=-1)
+    assert len(seeds) == 2
+    assert seeds[0] != seeds[1]
+    assert seeds[0] not in {"", "0", "None"}
+
+
+def test_local_stills_differ_when_the_seed_differs(tmp_path):
+    from dramastill.providers.image import _local_still
+
+    first = tmp_path / "a.png"
+    second = tmp_path / "b.png"
+    _local_still(first, 640, 360, 1)
+    _local_still(second, 640, 360, 2)
+    assert first.stat().st_size > 1000
+    assert first.read_bytes() != second.read_bytes()
+
+
+def test_backup_wait_stops_when_the_user_cancels(tmp_path, monkeypatch):
+    import dramastill.providers.image as image
+    from dramastill.cancel import PipelineCancelled
+
+    image._backup_not_before = time_in_future()
+    monkeypatch.setattr(image.time, "sleep", lambda *_args: None)
+    image.bind_image_stop(lambda: (_ for _ in ()).throw(PipelineCancelled("stop")))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(200, json={"event_id": "evt"})
+        return httpx.Response(200, text="event: error\ndata: null\n\n")
+
+    with pytest.raises(PipelineCancelled):
+        FluxSchnellImageProvider(base_url="https://flux.test", transport=httpx.MockTransport(handler)).generate(
+            prompt="A quiet room",
+            dest=tmp_path / "still.png",
+            size="1280x720",
+            seed=4,
+        )
 
 
 def test_saved_pollinations_settings_move_off_that_service():

@@ -242,6 +242,7 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
             provider=active.image,
             directory=work / "images",
             log=log,
+            token=token,
         )
 
     def do_audio():
@@ -282,6 +283,8 @@ def _prepare_media(*, settings, story, active, ffmpeg, ffprobe, work, token, log
         try:
             for future in as_completed(future_map):
                 results[future_map[future]] = future.result()
+        except (PipelineCancelled, PipelinePaused):
+            raise
         except Exception:
             token.request("cancel")
             raise

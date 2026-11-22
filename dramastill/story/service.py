@@ -106,7 +106,7 @@ def ensure_story(
 
         def write(chapter: dict) -> None:
             token.check()
-            index = outlines.index(chapter)
+            index = _chapter_index(outlines, chapter)
             number = chapter.get("index", index + 1)
             log("info", f"Пишется глава {number} из {len(outlines)}")
             previous = [_chapter_context(item) for item in outlines[:index]]
@@ -146,7 +146,7 @@ def ensure_story(
 
             def check(chapter: dict) -> None:
                 token.check()
-                index = outlines.index(chapter)
+                index = _chapter_index(outlines, chapter)
                 number = chapter.get("index", index + 1)
                 log("info", f"Проверка последовательности, глава {number}: жду ответ модели")
                 try:
@@ -209,6 +209,13 @@ def _publish_ready(callback: Callable[[dict], None] | None, outlines: list, sett
         callback({"chapters": ready})
 
 
+def _chapter_index(outlines: list, chapter: dict) -> int:
+    for index, item in enumerate(outlines):
+        if item is chapter:
+            return index
+    return outlines.index(chapter)
+
+
 def _chapter_context(chapter: dict) -> dict:
     return {
         "index": chapter.get("index"),
@@ -251,31 +258,40 @@ def ensure_metadata(
             return existing
     token.check()
     log("info", "Модель пишет название, описание и теги")
-    data = _complete_json(
-        llm,
-        system=SYSTEM,
-        user=metadata_prompt(
-            story,
-            story.get("narration") or "",
-            language_instruction(settings.language, settings.custom_language),
-        ),
-        temperature=min(0.8, temperature),
-        max_tokens=min(2500, max_tokens),
-        log=log,
-    )
-    titles = [str(item).strip() for item in data.get("titles") or [] if str(item).strip()]
-    if not titles and story.get("title"):
-        titles = [str(story["title"])]
-    metadata = {
-        "titles": titles[:5],
-        "description": str(data.get("description") or story.get("logline") or "").strip(),
-        "tags": [str(item).strip().lstrip("#") for item in data.get("tags") or [] if str(item).strip()],
-        "thumbnail_text": str(data.get("thumbnail_text") or story.get("thumbnail_text") or story.get("title") or "").strip(),
-    }
-    if not metadata["titles"] or not metadata["description"] or not metadata["thumbnail_text"]:
-        raise ProviderError("Модель не собрала материалы для YouTube")
+    try:
+        data = _complete_json(
+            llm,
+            system=SYSTEM,
+            user=metadata_prompt(
+                story,
+                story.get("narration") or "",
+                language_instruction(settings.language, settings.custom_language),
+            ),
+            temperature=min(0.8, temperature),
+            max_tokens=min(2500, max_tokens),
+            log=log,
+        )
+    except ProviderError as exc:
+        log("warning", f"Название собрано из истории: {exc}")
+        data = {}
+    metadata = _metadata_from(story, data)
     path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
     return metadata
+
+
+def _metadata_from(story: dict, data: dict) -> dict:
+    titles = [str(item).strip() for item in data.get("titles") or [] if str(item).strip()]
+    if not titles and story.get("title"):
+        titles = [str(story["title"]).strip()]
+    title = titles[0] if titles else "История"
+    description = str(data.get("description") or story.get("logline") or story.get("theme") or title).strip()
+    thumbnail = str(data.get("thumbnail_text") or story.get("thumbnail_text") or title).strip()
+    return {
+        "titles": (titles or [title])[:5],
+        "description": description or title,
+        "tags": [str(item).strip().lstrip("#") for item in data.get("tags") or [] if str(item).strip()],
+        "thumbnail_text": thumbnail or title,
+    }
 
 
 def _bind_llm(llm, token: CancelToken, log: Log) -> None:

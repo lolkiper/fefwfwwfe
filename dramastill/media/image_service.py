@@ -6,10 +6,11 @@ from pathlib import Path
 
 from PIL import Image
 
+from dramastill.cancel import CancelToken, PipelineCancelled, PipelinePaused
 from dramastill.config.defaults import ImageSettings
 from dramastill.providers.base import ImageProvider
 from dramastill.providers.errors import ProviderError
-from dramastill.providers.image import bind_image_log, take_image_note
+from dramastill.providers.image import bind_image_log, bind_image_stop, take_image_note
 from dramastill.story.image_prompt import build_chapter_image_prompt, build_image_prompt
 
 
@@ -68,6 +69,7 @@ def ensure_chapter_images(
     provider: ImageProvider,
     directory: Path,
     log,
+    token: CancelToken | None = None,
 ) -> list[Path]:
     """Ровно одно изображение на главу. Повтор при ошибке касается только этого кадра."""
     chapters = [chapter for chapter in (story.get("chapters") or []) if isinstance(chapter, dict)]
@@ -90,6 +92,8 @@ def ensure_chapter_images(
             return
         last: Exception | None = None
         bind_image_log(log)
+        if token is not None:
+            bind_image_stop(token.check)
         for attempt in range(1, 4):
             log("info", f"Глава {number}: генерируется своё изображение, попытка {attempt} из 3")
             partial = dest.with_name(f"{dest.stem}.partial{dest.suffix}")
@@ -111,6 +115,10 @@ def ensure_chapter_images(
                     log("info", f"Глава {number}: {note}")
                 log("info", f"Глава {number}: изображение сохранено, {dest.name}")
                 return
+            except (PipelineCancelled, PipelinePaused):
+                if partial.exists():
+                    partial.unlink()
+                raise
             except Exception as exc:
                 last = exc
                 take_image_note()

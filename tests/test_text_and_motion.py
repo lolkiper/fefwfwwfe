@@ -243,3 +243,57 @@ def test_flashes_are_brief_and_the_layer_loops():
     frame_start = render_particle_frame([peak], 80, 48, 0, LOOP_SECONDS, {})
     frame_end = render_particle_frame([peak], 80, 48, LOOP_SECONDS, LOOP_SECONDS, {})
     assert int(abs(frame_start.astype(int) - frame_end.astype(int)).mean()) == 0
+
+
+def test_metadata_failure_keeps_the_story_title(tmp_path):
+    from dramastill.cancel import CancelToken
+    from dramastill.config.defaults import StorySettings
+    from dramastill.providers.errors import ProviderError
+    from dramastill.story.service import ensure_metadata
+
+    class LLM:
+        def retries_immediately(self):
+            return False
+
+        def complete(self, *, system, user, temperature, max_tokens, json_mode):
+            raise ProviderError("Модель не вернула пригодный JSON")
+
+    story = {
+        "title": "Сейф",
+        "logline": "Спор из-за завещания",
+        "thumbnail_text": "СЕЙФ",
+        "narration": "Марина держит бумагу.",
+    }
+    notes = []
+    data = ensure_metadata(
+        story=story,
+        llm=LLM(),
+        path=tmp_path / "youtube.json",
+        settings=StorySettings(),
+        temperature=0.4,
+        max_tokens=800,
+        token=CancelToken(),
+        log=lambda level, message: notes.append((level, message)),
+    )
+    assert data["titles"] == ["Сейф"]
+    assert data["thumbnail_text"] == "СЕЙФ"
+    assert "завещания" in data["description"]
+    assert any("Название собрано из истории" in message for _level, message in notes)
+
+
+def test_narration_without_a_stamp_is_rebuilt(tmp_path, monkeypatch):
+    from dramastill.media.tts_service import _narration_reusable
+
+    master = tmp_path / "narration.wav"
+    master.write_bytes(b"x" * 1000)
+    stamp = tmp_path / "narration.stamp"
+
+    class Info:
+        has_audio = True
+        duration = 12.0
+
+    monkeypatch.setattr("dramastill.media.tts_service.probe", lambda *_args: Info())
+    assert _narration_reusable("ffprobe", master, stamp, "current") is False
+    stamp.write_text("current", encoding="utf-8")
+    assert _narration_reusable("ffprobe", master, stamp, "current") is True
+    assert _narration_reusable("ffprobe", master, stamp, "other") is False
