@@ -25,16 +25,25 @@ const LINKS_FILE = 'Links.txt';
 const HISTORY_FILE = 'channel_history.json';
 const LOG_FILE = 'channel_log.txt';
 const MAX_SHORT_SECONDS = 150;
+const MIN_SHORT_SECONDS = 35;
 const MAX_CHANNELS = 200;
 const MAX_VIDEO_COUNT = 50;
 const MAX_SINCE_VIDEOS = 400;
 const DEFAULT_VIDEO_COUNT = 1;
+const DEFAULT_CHANNEL_CONCURRENCY = 4;
+const MAX_CHANNEL_CONCURRENCY = 6;
 const HISTORY_VERSION = 1;
 
 function normalizeVideoCount(value) {
   const n = Math.round(Number(value));
   if (!Number.isFinite(n) || n < 1) return DEFAULT_VIDEO_COUNT;
   return Math.min(MAX_VIDEO_COUNT, n);
+}
+
+function normalizeChannelConcurrency(value) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n) || n < 1) return DEFAULT_CHANNEL_CONCURRENCY;
+  return Math.min(MAX_CHANNEL_CONCURRENCY, n);
 }
 
 /** Дата «с какого дня» в виде YYYYMMDD. Принимает YYYY-MM-DD, YYYYMMDD и ДД.ММ.ГГГГ. */
@@ -217,17 +226,19 @@ function channelKeyFrom(info, inputUrl) {
 /**
  * latest — ролики от нового к старому.
  * ignored: среди них нет ни одного ещё не виденного.
- * Ссылка пишется, если длительность не больше maxSeconds (до 150 с включительно).
- * Длинные ролики запоминаются, чтобы в следующий раз не считаться новыми.
+ * Ссылка пишется, если длительность от minSeconds до maxSeconds включительно.
+ * Короткие и длинные ролики запоминаются, чтобы в следующий раз не считаться новыми.
  */
-function classifyFresh(videos, seen, maxSeconds = MAX_SHORT_SECONDS) {
+function classifyFresh(videos, seen, maxSeconds = MAX_SHORT_SECONDS, minSeconds = MIN_SHORT_SECONDS) {
   const seenSet = seen instanceof Set ? seen : new Set(seen || []);
   const fresh = (videos || []).filter((video) => video && video.id && !seenSet.has(video.id));
-  if (!fresh.length) return { ignored: true, links: [], markSeen: [], tooLong: 0, unknown: 0 };
+  if (!fresh.length) return { ignored: true, links: [], markSeen: [], tooLong: 0, tooShort: 0, unknown: 0 };
   const links = [];
   const markSeen = [];
   let tooLong = 0;
+  let tooShort = 0;
   let unknown = 0;
+  const floor = Number(minSeconds) > 0 ? Number(minSeconds) : MIN_SHORT_SECONDS;
   fresh.forEach((video) => {
     const duration = Number(video.duration);
     if (!Number.isFinite(duration) || duration <= 0) {
@@ -235,10 +246,11 @@ function classifyFresh(videos, seen, maxSeconds = MAX_SHORT_SECONDS) {
       return;
     }
     markSeen.push(video.id);
-    if (duration <= maxSeconds) links.push(video.url);
+    if (duration < floor) tooShort += 1;
+    else if (duration <= maxSeconds) links.push(video.url);
     else tooLong += 1;
   });
-  return { ignored: false, links, markSeen, tooLong, unknown };
+  return { ignored: false, links, markSeen, tooLong, tooShort, unknown };
 }
 
 class ChannelCollector {
@@ -250,9 +262,26 @@ class ChannelCollector {
     this.count = normalizeVideoCount(options.count);
     this.since = normalizeSinceDate(options.since);
     this.maxSeconds = Number(options.maxSeconds) > 0 ? Number(options.maxSeconds) : MAX_SHORT_SECONDS;
+    this.minSeconds = Number(options.minSeconds) > 0 ? Number(options.minSeconds) : MIN_SHORT_SECONDS;
+    this.concurrency = normalizeChannelConcurrency(options.concurrency);
     this.stopped = false;
     this.running = false;
     this.children = new Set();
+    this._lock = Promise.resolve();
+  }
+
+  async locked(fn) {
+    const previous = this._lock;
+    let release;
+    this._lock = new Promise((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
   }
 
   log(level, message) {
@@ -380,19 +409,25 @@ class ChannelCollector {
     const videos = videosFromPlaylist(info, limit);
     const selected = [];
     let reachedOlder = false;
-    for (const video of videos) {
-      if (this.stopped) break;
-      if (video.duration == null || (this.since && !video.uploadDate)) {
+    const width = Math.max(1, this.concurrency);
+    for (let offset = 0; offset < videos.length && !this.stopped && !reachedOlder; offset += width) {
+      const batch = videos.slice(offset, offset + width);
+      await Promise.all(batch.map(async (video) => {
+        if (this.stopped) return;
+        if (video.duration != null && (!this.since || video.uploadDate)) return;
         const probed = await this.probeVideo(video.url);
         if (video.duration == null) video.duration = probed.duration;
         if (!video.uploadDate && probed.uploadDate) video.uploadDate = probed.uploadDate;
         if (probed.title) video.title = probed.title;
+      }));
+      for (const video of batch) {
+        if (this.stopped) break;
+        if (this.since && video.uploadDate && video.uploadDate < this.since) {
+          reachedOlder = true;
+          break;
+        }
+        selected.push(video);
       }
-      if (this.since && video.uploadDate && video.uploadDate < this.since) {
-        reachedOlder = true;
-        break;
-      }
-      selected.push(video);
     }
     if (this.since && !reachedOlder && videos.length >= limit) {
       this.log(
@@ -428,6 +463,7 @@ class ChannelCollector {
       ignored: 0,
       links: 0,
       tooLong: 0,
+      tooShort: 0,
       unknown: 0,
       errors: 0,
       cancelled: false,
@@ -439,85 +475,102 @@ class ChannelCollector {
       : `последних Shorts с канала: ${this.count}`;
     this.log(
       'info',
-      `Каналов: ${parsed.length}, ${windowText}, не длиннее ${durationLimitLabel(this.maxSeconds)} (${this.maxSeconds} с)`
+      `Каналов: ${parsed.length}, ${windowText}, от ${this.minSeconds} до ${this.maxSeconds} с, потоков: ${this.concurrency}`
     );
     if (truncated) this.log('warn', `Беру первые ${MAX_CHANNELS} каналов, остальные строки пропущены.`);
     this.emit(summary, 'Сбор ссылок');
 
     try {
-      for (const channelUrl of parsed) {
-        if (this.stopped) break;
-        this.log('info', `Канал: ${channelUrl}`);
-        try {
-          const listed = await this.listVideos(channelUrl);
-          if (this.stopped) break;
-          const key = listed.key || channelUrl;
-          const record = history.channels[key] && typeof history.channels[key] === 'object'
-            ? history.channels[key]
-            : { input: channelUrl, seen: [] };
-          const seen = new Set(Array.isArray(record.seen) ? record.seen : []);
-          if (!listed.videos.length) {
-            summary.checked += 1;
-            summary.ignored += 1;
-            this.log(
-              'info',
-              listed.reachedOlder
-                ? `На вкладке Shorts нет роликов с ${formatSinceDate(this.since)}: ${channelUrl}`
-                : `На вкладке Shorts нет роликов: ${channelUrl}`
-            );
-            this.emit(summary);
-            continue;
+      let cursor = 0;
+      const worker = async () => {
+        while (!this.stopped) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= parsed.length) return;
+          const channelUrl = parsed[index];
+          this.log('info', `Канал: ${channelUrl}`);
+          try {
+            const listed = await this.listVideos(channelUrl);
+            if (this.stopped) return;
+            await this.locked(async () => {
+              if (this.stopped) return;
+              const key = listed.key || channelUrl;
+              const record = history.channels[key] && typeof history.channels[key] === 'object'
+                ? history.channels[key]
+                : { input: channelUrl, seen: [] };
+              const seen = new Set(Array.isArray(record.seen) ? record.seen : []);
+              if (!listed.videos.length) {
+                summary.checked += 1;
+                summary.ignored += 1;
+                this.log(
+                  'info',
+                  listed.reachedOlder
+                    ? `На вкладке Shorts нет роликов с ${formatSinceDate(this.since)}: ${channelUrl}`
+                    : `На вкладке Shorts нет роликов: ${channelUrl}`
+                );
+                this.emit(summary);
+                return;
+              }
+              const decision = classifyFresh(listed.videos, seen, this.maxSeconds, this.minSeconds);
+              summary.checked += 1;
+              if (decision.ignored) {
+                summary.ignored += 1;
+                this.log('info', `Новых Shorts нет — канал пропущен: ${channelUrl}`);
+                this.emit(summary);
+                return;
+              }
+              decision.markSeen.forEach((id) => seen.add(id));
+              const freshLinks = decision.links.filter((url) => {
+                const id = extractVideoId(url);
+                return id && !existingIds.has(id);
+              });
+              freshLinks.forEach((url) => existingIds.add(extractVideoId(url)));
+              summary.links += freshLinks.length;
+              summary.tooLong += decision.tooLong;
+              summary.tooShort += decision.tooShort;
+              summary.unknown += decision.unknown;
+              if (freshLinks.length) {
+                appendNewLinks(linksPath, freshLinks);
+                this.log('info', `В Links.txt добавлено ${freshLinks.length}: ${channelUrl}`);
+              }
+              record.input = channelUrl;
+              record.seen = Array.from(seen).slice(-5000);
+              record.updatedAt = new Date().toISOString();
+              history.channels[key] = record;
+              writeHistory(historyPath, history);
+              if (!freshLinks.length && decision.tooShort) {
+                this.log('info', `Новые Shorts короче ${this.minSeconds} с — ссылка не записана: ${channelUrl}`);
+              }
+              if (!freshLinks.length && decision.tooLong) {
+                this.log('info', `Новые ролики длиннее ${durationLimitLabel(this.maxSeconds)} — ссылка не записана: ${channelUrl}`);
+              } else if (!freshLinks.length && decision.unknown && !decision.tooShort) {
+                this.log('warn', `Длительность новых роликов неизвестна — ссылка не записана: ${channelUrl}`);
+              } else if (!freshLinks.length && !decision.tooShort && !decision.tooLong) {
+                this.log('info', `Новых коротких роликов нет: ${channelUrl}`);
+              }
+              this.emit(summary);
+            });
+          } catch (err) {
+            if ((err && err.cancelled) || this.stopped) {
+              this.stopped = true;
+              return;
+            }
+            await this.locked(async () => {
+              summary.errors += 1;
+              this.log('error', `${channelUrl}: ${(err && err.message) || err}`);
+              this.emit(summary);
+            });
           }
-          const decision = classifyFresh(listed.videos, seen, this.maxSeconds);
-          summary.checked += 1;
-          if (decision.ignored) {
-            summary.ignored += 1;
-            this.log('info', `Новых Shorts нет — канал пропущен: ${channelUrl}`);
-            this.emit(summary);
-            continue;
-          }
-          decision.markSeen.forEach((id) => seen.add(id));
-          const freshLinks = decision.links.filter((url) => {
-            const id = extractVideoId(url);
-            return id && !existingIds.has(id);
-          });
-          freshLinks.forEach((url) => existingIds.add(extractVideoId(url)));
-          summary.links += freshLinks.length;
-          summary.tooLong += decision.tooLong;
-          summary.unknown += decision.unknown;
-          if (freshLinks.length) {
-            appendNewLinks(linksPath, freshLinks);
-            this.log('info', `В Links.txt добавлено ${freshLinks.length}: ${channelUrl}`);
-          }
-          record.input = channelUrl;
-          record.seen = Array.from(seen).slice(-5000);
-          record.updatedAt = new Date().toISOString();
-          history.channels[key] = record;
-          writeHistory(historyPath, history);
-          if (!freshLinks.length && decision.tooLong && !decision.links.length) {
-            this.log('info', `Новые ролики длиннее ${durationLimitLabel(this.maxSeconds)} — ссылка не записана: ${channelUrl}`);
-          } else if (!freshLinks.length && decision.unknown && !decision.links.length) {
-            this.log('warn', `Длительность новых роликов неизвестна — ссылка не записана: ${channelUrl}`);
-          } else if (!freshLinks.length) {
-            this.log('info', `Новых коротких роликов нет: ${channelUrl}`);
-          }
-          this.emit(summary);
-        } catch (err) {
-          if ((err && err.cancelled) || this.stopped) {
-            this.stopped = true;
-            break;
-          }
-          summary.errors += 1;
-          this.log('error', `${channelUrl}: ${(err && err.message) || err}`);
-          this.emit(summary);
         }
-      }
+      };
+      const workers = Math.min(this.concurrency, parsed.length);
+      await Promise.all(Array.from({ length: workers }, () => worker()));
       summary.cancelled = this.stopped;
       this.log(
         summary.cancelled ? 'warn' : 'success',
         summary.cancelled
           ? `Сбор остановлен. Записано ссылок: ${summary.links}`
-          : `Готово. Ссылок: ${summary.links}, без новых видео: ${summary.ignored}, длиннее ${durationLimitLabel(this.maxSeconds)}: ${summary.tooLong}`
+          : `Готово. Ссылок: ${summary.links}, без новых видео: ${summary.ignored}, короче ${this.minSeconds} с: ${summary.tooShort}, длиннее ${durationLimitLabel(this.maxSeconds)}: ${summary.tooLong}`
       );
       this.emit(summary, summary.cancelled ? 'Остановлено' : 'Готово');
       return summary;
@@ -533,11 +586,14 @@ module.exports = {
   HISTORY_FILE,
   LOG_FILE,
   MAX_SHORT_SECONDS,
+  MIN_SHORT_SECONDS,
   MAX_CHANNELS,
   MAX_VIDEO_COUNT,
   MAX_SINCE_VIDEOS,
   DEFAULT_VIDEO_COUNT,
+  DEFAULT_CHANNEL_CONCURRENCY,
   normalizeVideoCount,
+  normalizeChannelConcurrency,
   normalizeSinceDate,
   formatSinceDate,
   normalizeChannelUrl,

@@ -717,15 +717,29 @@
           <article class="card">
             <div class="card__head">
               <h2>2. С какой даты брать</h2>
-              <span class="card__hint">До 2,5 минут</span>
+              <span class="card__hint">35 с — 2,5 мин</span>
             </div>
             <div class="field">
-              <label for="ch-since">Все ролики с этой даты</label>
+              <label for="ch-since">Все Shorts с этой даты</label>
               <input type="date" id="ch-since" />
               <p class="field__note">
-                Например 10 ноября — дата меняется. С вкладки Shorts каждого канала берутся все ролики с этого дня включительно.
-                Если Shorts не длиннее 2,5 минут (150 секунд), ссылка пишется в Links.txt.
-                Уже виденные ролики запоминаются: если новых нет, канал пропускается и ссылка повторно не пишется.
+                Например 10 ноября — дата меняется. С вкладки Shorts каждого канала берутся ролики с этого дня.
+                В Links.txt попадает Shorts от 35 секунд до 2,5 минут (150 секунд). Короче 35 секунд не берётся.
+              </p>
+            </div>
+            <div class="field">
+              <label for="ch-parallel">Сколько каналов проверять одновременно</label>
+              <select id="ch-parallel">
+                <option value="1">1 — по одному</option>
+                <option value="2">2 потока</option>
+                <option value="3">3 потока</option>
+                <option value="4" selected>4 потока</option>
+                <option value="5">5 потоков</option>
+                <option value="6">6 потоков</option>
+              </select>
+              <p class="field__note">
+                Несколько каналов проверяются сразу, поэтому список ссылок собирается быстрее.
+                Уже виденные Shorts запоминаются: если новых нет, канал пропускается.
               </p>
             </div>
           </article>
@@ -766,6 +780,7 @@
               <div class="counter"><span id="ch-links-count">0</span><small>ссылок</small></div>
               <div class="counter"><span id="ch-ignored">0</span><small>без новых</small></div>
               <div class="counter"><span id="ch-long">0</span><small>длиннее 2,5 мин</small></div>
+              <div class="counter"><span id="ch-short">0</span><small>короче 35 с</small></div>
             </div>
           </article>
 

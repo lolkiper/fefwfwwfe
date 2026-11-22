@@ -15,6 +15,7 @@ const {
   LINKS_FILE,
   HISTORY_FILE,
   MAX_SHORT_SECONDS,
+  MIN_SHORT_SECONDS,
   MAX_SINCE_VIDEOS,
   normalizeChannelUrl,
   parseChannelList,
@@ -68,6 +69,7 @@ function main() {
   check(parsed.length === 2, 'дубликаты и не-каналы отбрасываются', parsed.join(' | '));
   check(normalizeVideoCount(0) === 1 && normalizeVideoCount(99) === 50 && normalizeVideoCount('3') === 3, 'число роликов в диапазоне 1…50');
   check(MAX_SHORT_SECONDS === 150, 'порог короткого ролика — 2,5 минуты');
+  check(MIN_SHORT_SECONDS === 35, 'короче 35 секунд Shorts не берётся');
   check(normalizeSinceDate('2026-11-10') === '20261110', 'дата из календаря становится YYYYMMDD');
   check(normalizeSinceDate('10.11.2026') === '20261110', 'дата ДД.ММ.ГГГГ принимается');
   check(normalizeSinceDate('2026-02-31') === null, 'несуществующий день отвергается');
@@ -79,16 +81,19 @@ function main() {
       { id: 'TOOLONG1111', url: 'https://www.youtube.com/watch?v=TOOLONG1111', duration: 180 },
       { id: 'EXACTLY150S', url: 'https://www.youtube.com/watch?v=EXACTLY150S', duration: 150 },
       { id: 'OVER150SEC1', url: 'https://www.youtube.com/watch?v=OVER150SEC1', duration: 150.1 },
-      { id: 'JUSTUNDER12', url: 'https://www.youtube.com/watch?v=JUSTUNDER12', duration: 119.9 }
+      { id: 'JUSTUNDER12', url: 'https://www.youtube.com/watch?v=JUSTUNDER12', duration: 119.9 },
+      { id: 'EXACTLY35S', url: 'https://www.youtube.com/watch?v=EXACTLY35S', duration: 35 },
+      { id: 'TOOSHORT34', url: 'https://www.youtube.com/watch?v=TOOSHORT34', duration: 34 }
     ],
     new Set(['SEENSHORT11'])
   );
   check(!fresh.ignored, 'есть новое видео — канал не игнорируется');
   check(
-    fresh.links.length === 3 && fresh.links[0].includes('NEWSHORT111') && fresh.links[1].includes('EXACTLY150S') && fresh.links[2].includes('JUSTUNDER12'),
-    'в ссылки попадают ролики до 150 секунд включительно',
+    fresh.links.length === 4 && fresh.links[0].includes('NEWSHORT111') && fresh.links[1].includes('EXACTLY150S') && fresh.links[2].includes('JUSTUNDER12') && fresh.links[3].includes('EXACTLY35S'),
+    'в ссылки попадают ролики от 35 до 150 секунд',
     fresh.links.join(',')
   );
+  check(fresh.tooShort === 1 && fresh.markSeen.includes('TOOSHORT34'), 'короче 35 секунд не попадает в файл и запоминается', String(fresh.tooShort));
   check(fresh.tooLong === 2, 'дольше 2,5 минут не попадает в файл', String(fresh.tooLong));
   check(fresh.markSeen.includes('TOOLONG1111') && fresh.markSeen.includes('OVER150SEC1') && fresh.markSeen.includes('EXACTLY150S'), 'длинные ролики запоминаются, чтобы не прийти снова');
   check(classifyFresh([{ id: 'SEENSHORT11', duration: 30, url: 'u' }], ['SEENSHORT11']).ignored, 'если новых видео нет, канал игнорируется');
@@ -130,6 +135,7 @@ function main() {
   const collector = new ChannelCollector({
     outputDir: ROOT,
     count: 1,
+    concurrency: 1,
     runner
   });
   return collector.run('@Alpha\nhttps://www.youtube.com/@Beta\n@Gamma').then(async (summary) => {
@@ -152,7 +158,7 @@ function main() {
 
     console.log('\n4) Новое короткое видео канала попадает в файл, старое — нет…');
     catalogs['https://www.youtube.com/@Alpha/shorts'] = playlist('UCalpha', [
-      { id: 'ALPHANEW222', duration: 33, title: 'newer' },
+      { id: 'ALPHANEW222', duration: 36, title: 'newer' },
       { id: 'ALPHASHORT1', duration: 48, title: 'previous' }
     ]);
     const thirdCollector = new ChannelCollector({ outputDir: ROOT, count: 2, runner });
@@ -170,6 +176,7 @@ function main() {
     stopper = new ChannelCollector({
       outputDir: stopDir,
       count: 1,
+      concurrency: 1,
       runner: async (args) => {
         calls += 1;
         const url = args[args.length - 1];
@@ -222,6 +229,33 @@ function main() {
     const sinceHistory = JSON.parse(fs.readFileSync(path.join(sinceDir, HISTORY_FILE), 'utf8'));
     check(sinceHistory.channels.UCsince.seen.includes('NOV10TOOLNG'), 'длинный ролик с этой даты запомнен');
     check(!sinceHistory.channels.UCsince.seen.includes('NOV09SHORT1'), 'ролик раньше даты не помечается просмотренным');
+
+    console.log('\n7) Несколько каналов проверяются одновременно…');
+    const parallelDir = path.join(ROOT, 'parallel');
+    fs.mkdirSync(parallelDir, { recursive: true });
+    let active = 0;
+    let maxActive = 0;
+    const parallelCollector = new ChannelCollector({
+      outputDir: parallelDir,
+      since: '2026-11-10',
+      concurrency: 2,
+      runner: async (args) => {
+        if (!args.includes('--flat-playlist')) return playlist('UCprobe', []);
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        active -= 1;
+        const left = String(args[args.length - 1]).includes('@Left');
+        return playlist(left ? 'UCleft' : 'UCright', [
+          { id: left ? 'LEFTSHORT11' : 'RIGHTSHORT1', duration: left ? 20 : 50, timestamp: day('20261120'), title: left ? 'too short' : 'ok' }
+        ]);
+      }
+    });
+    const parallelSummary = await parallelCollector.run('@Left\n@Right');
+    check(maxActive >= 2, 'два канала запрашиваются одновременно', `max=${maxActive}`);
+    check(parallelSummary.links === 1 && parallelSummary.tooShort === 1, 'поток записал Shorts от 35 с и пропустил более короткий', JSON.stringify(parallelSummary));
+    const parallelLines = fs.readFileSync(path.join(parallelDir, LINKS_FILE), 'utf8');
+    check(parallelLines.includes('RIGHTSHORT1') && !parallelLines.includes('LEFTSHORT11'), 'короче 35 секунд не записан, подходящий записан');
 
     fs.rmSync(ROOT, { recursive: true, force: true });
     console.log(`\nИтог: ${failures ? `${failures} проверок провалено` : 'все проверки каналов пройдены'}`);

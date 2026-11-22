@@ -210,6 +210,7 @@ const el = {
   chLinks: document.getElementById('ch-links'),
   chLinksNote: document.getElementById('ch-links-note'),
   chSince: document.getElementById('ch-since'),
+  chParallel: document.getElementById('ch-parallel'),
   chDir: document.getElementById('ch-dir'),
   chDirNote: document.getElementById('ch-dir-note'),
   chPickDir: document.getElementById('ch-pick-dir'),
@@ -224,6 +225,7 @@ const el = {
   chLinksCount: document.getElementById('ch-links-count'),
   chIgnored: document.getElementById('ch-ignored'),
   chLong: document.getElementById('ch-long'),
+  chShort: document.getElementById('ch-short'),
   chLog: document.getElementById('ch-log'),
   chCopyLog: document.getElementById('ch-copy-log'),
   chClearLog: document.getElementById('ch-clear-log')
@@ -563,6 +565,7 @@ function collectSettings() {
     renameKeepTxt: el.rnKeepTxt.checked,
     channelLinks: el.chLinks ? el.chLinks.value : '',
     channelSince: el.chSince ? el.chSince.value : '',
+    channelParallel: el.chParallel ? Number(el.chParallel.value) : 4,
     channelDir: el.chDir ? el.chDir.value.trim() : ''
   };
 }
@@ -727,6 +730,10 @@ function restoreSettings() {
   if (el.chDir && saved.channelDir) el.chDir.value = saved.channelDir;
   if (el.chSince) {
     el.chSince.value = /^\d{4}-\d{2}-\d{2}$/.test(saved.channelSince || '') ? saved.channelSince : defaultSinceInput();
+  }
+  if (el.chParallel && Number.isFinite(Number(saved.channelParallel))) {
+    const parallel = String(Math.min(6, Math.max(1, Math.round(Number(saved.channelParallel)))));
+    if (Array.from(el.chParallel.options).some((option) => option.value === parallel)) el.chParallel.value = parallel;
   }
 }
 
@@ -2018,6 +2025,7 @@ function setChannelRunning(running) {
   if (el.chStart) el.chStart.disabled = running;
   if (el.chStop) el.chStop.disabled = !running;
   if (el.chSince) el.chSince.disabled = running;
+  if (el.chParallel) el.chParallel.disabled = running;
   if (el.chLinks) el.chLinks.readOnly = running;
 }
 
@@ -2033,6 +2041,7 @@ function applyChannelProgress(progress) {
   if (el.chLinksCount) el.chLinksCount.textContent = String(progress.links || 0);
   if (el.chIgnored) el.chIgnored.textContent = String(progress.ignored || 0);
   if (el.chLong) el.chLong.textContent = String(progress.tooLong || 0);
+  if (el.chShort) el.chShort.textContent = String(progress.tooShort || 0);
   if (progress.status && el.chStatus) el.chStatus.textContent = progress.status;
 }
 
@@ -2046,6 +2055,7 @@ function bindChannelsUi() {
   refreshOpen();
   if (el.chLinks) el.chLinks.addEventListener('change', saveSettings);
   if (el.chSince) el.chSince.addEventListener('change', saveSettings);
+  if (el.chParallel) el.chParallel.addEventListener('change', saveSettings);
   if (el.chDir) {
     el.chDir.addEventListener('change', () => {
       saveSettings();
@@ -2097,7 +2107,8 @@ function bindChannelsUi() {
     const result = await window.api.startChannels({
       outputDir,
       text,
-      since: el.chSince ? el.chSince.value : ''
+      since: el.chSince ? el.chSince.value : '',
+      concurrency: el.chParallel ? Number(el.chParallel.value) : 4
     });
     if (result && !result.ok && !result.reported) {
       setChannelRunning(false);
@@ -2165,7 +2176,7 @@ function bindChannelsUi() {
     el.chBadge.textContent = 'Готово';
     el.chBadge.className = 'badge badge--done';
     el.chStatus.textContent =
-      `Готово. Ссылок: ${summary.links || 0}, без новых видео: ${summary.ignored || 0}, длиннее 2,5 минут: ${summary.tooLong || 0}.`;
+      `Готово. Ссылок: ${summary.links || 0}, без новых видео: ${summary.ignored || 0}, короче 35 с: ${summary.tooShort || 0}, длиннее 2,5 минут: ${summary.tooLong || 0}.`;
   });
 }
 

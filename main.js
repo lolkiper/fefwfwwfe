@@ -1118,6 +1118,7 @@ handle('channels:start', async (ws, payload, rt) => {
     ytdlpPath,
     count: payload.count,
     since,
+    concurrency: payload.concurrency,
     hooks: {
       onLog: (level, message) => send(ws.id, 'channels:log', { level, message, time: Date.now() }),
       onProgress: (state) => send(ws.id, 'channels:progress', state)
