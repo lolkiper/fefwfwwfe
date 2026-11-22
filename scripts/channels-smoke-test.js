@@ -260,6 +260,53 @@ function main() {
     const parallelLines = fs.readFileSync(path.join(parallelDir, LINKS_FILE), 'utf8');
     check(parallelLines.includes('RIGHTSHORT1') && !parallelLines.includes('LEFTSHORT11'), 'короче 35 секунд не записан, подходящий записан');
 
+    console.log('\n8) Сотни роликов без длительности не открываются по одному…');
+    const thickDir = path.join(ROOT, 'thick');
+    fs.mkdirSync(thickDir, { recursive: true });
+    let probes = 0;
+    const bare = Array.from({ length: 12 }, (_, index) => ({ id: `BARE${String(index).padStart(7, '0')}`, title: 'bare' }));
+    const rich = bare.map((entry, index) => ({ ...entry, duration: 40 + (index % 20) }));
+    const thick = new ChannelCollector({
+      outputDir: thickDir,
+      since: '2026-11-10',
+      concurrency: 1,
+      runner: async (args) => {
+        if (!args.includes('--flat-playlist')) {
+          probes += 1;
+          return { stdout: JSON.stringify({ duration: 40 }), stderr: '' };
+        }
+        const url = String(args[args.length - 1]);
+        if (url.includes('list=UUSH')) return playlist('UCthick01', rich);
+        return playlist('UCthick01', bare);
+      }
+    });
+    const thickSummary = await thick.run('@Thick');
+    check(probes === 0, 'длительность взята из полного списка, ролики по одному не открывались', `probes=${probes}`);
+    check(thickSummary.links === 12, 'все Shorts с длительностью из полного списка записаны', JSON.stringify(thickSummary));
+
+    const stuckDir = path.join(ROOT, 'stuck');
+    fs.mkdirSync(stuckDir, { recursive: true });
+    let stuckProbes = 0;
+    const stuck = new ChannelCollector({
+      outputDir: stuckDir,
+      since: '2026-11-10',
+      concurrency: 1,
+      runner: async (args) => {
+        if (!args.includes('--flat-playlist')) {
+          stuckProbes += 1;
+          return { stdout: '{}', stderr: '' };
+        }
+        if (String(args[args.length - 1]).includes('list=UUSH')) throw new Error('playlist unavailable');
+        return playlist('UCstuck01', bare);
+      }
+    });
+    const stuckSummary = await stuck.run('@Stuck');
+    check(
+      stuckProbes === 0 && stuckSummary.links === 0 && stuckSummary.errors === 0 && stuckSummary.unknown === 12,
+      'если длительности нет у многих роликов, сбор заканчивается без проверки каждого',
+      JSON.stringify(stuckSummary)
+    );
+
     fs.rmSync(ROOT, { recursive: true, force: true });
     console.log(`\nИтог: ${failures ? `${failures} проверок провалено` : 'все проверки каналов пройдены'}`);
     process.exit(failures ? 1 : 0);

@@ -39,6 +39,10 @@ const DEFAULT_VIDEO_COUNT = 1;
 const DEFAULT_CHANNEL_CONCURRENCY = 2;
 const MAX_CHANNEL_CONCURRENCY = 6;
 const PROBE_CONCURRENCY = 2;
+/** Больше этого числа роликов без длительности по одному не проверяем: иначе сбор замирает. */
+const MAX_INLINE_PROBES = 8;
+/** Один зависший yt-dlp не должен держать весь сбор. */
+const PLAYLIST_TIMEOUT_MS = 50_000;
 /** Сколько роликов подряд старше даты нужно увидеть, чтобы остановить просмотр списка. */
 const OLD_STREAK_TO_STOP = 12;
 const HISTORY_VERSION = 1;
@@ -218,6 +222,21 @@ function durationSeconds(entry) {
 }
 
 /** Полный список Shorts канала: UC… → плейлист UUSH…. Вкладка /shorts часто отдаёт только первые ролики. */
+function knownDurationCount(videos) {
+  return (videos || []).reduce((count, video) => count + (video && video.duration != null ? 1 : 0), 0);
+}
+
+/** Берём список, в котором больше известных длительностей, а при равенстве — более длинный. */
+function preferRicherList(current, incoming) {
+  if (!incoming || !incoming.length) return current || [];
+  if (!current || !current.length) return incoming;
+  const currentKnown = knownDurationCount(current);
+  const incomingKnown = knownDurationCount(incoming);
+  if (incomingKnown > currentKnown) return incoming;
+  if (incomingKnown === currentKnown && incoming.length > current.length) return incoming;
+  return current;
+}
+
 function shortsPlaylistUrl(channelId) {
   const id = String(channelId || '');
   if (!/^UC[A-Za-z0-9_-]{2,}$/.test(id)) return null;
@@ -365,10 +384,12 @@ class ChannelCollector {
       let stdout = '';
       let stderr = '';
       let settled = false;
+      let deadline;
       const finish = (fn, value) => {
         if (settled) return;
         settled = true;
         clearInterval(stopTimer);
+        clearTimeout(deadline);
         this.children.delete(child);
         fn(value);
       };
@@ -379,6 +400,12 @@ class ChannelCollector {
         err.cancelled = true;
         finish(reject, err);
       }, 150);
+      const deadlineTimer = setTimeout(() => {
+        if (settled) return;
+        killProcessTree(child);
+        finish(reject, new Error(`yt-dlp не ответил за ${Math.round(PLAYLIST_TIMEOUT_MS / 1000)} с`));
+      }, PLAYLIST_TIMEOUT_MS);
+      deadline = deadlineTimer;
       child.stdout.on('data', (chunk) => {
         stdout += chunk.toString('utf8');
       });
@@ -515,17 +542,15 @@ class ChannelCollector {
     const limit = this.since ? MAX_SINCE_VIDEOS : this.count;
     const info = await this.fetchPlaylist(channelUrl, limit);
     let videos = videosFromPlaylist(info, limit);
-    if (this.since && videos.length < limit) {
-      const playlistUrl = shortsPlaylistUrl(channelKeyFrom(info, ''));
-      if (playlistUrl) {
-        try {
-          const fullInfo = await this.fetchPlaylist(playlistUrl, limit);
-          const fullVideos = videosFromPlaylist(fullInfo, limit);
-          if (fullVideos.length > videos.length) videos = fullVideos;
-        } catch (err) {
-          if ((err && err.cancelled) || this.stopped) throw err;
-          this.log('warn', `Полный список Shorts не открылся, беру вкладку канала: ${shortYtError(err && err.message)}`);
-        }
+    const missingDurations = videos.length - knownDurationCount(videos);
+    const playlistUrl = shortsPlaylistUrl(channelKeyFrom(info, ''));
+    if (playlistUrl && (missingDurations > MAX_INLINE_PROBES || (this.since && videos.length < limit))) {
+      try {
+        const fullInfo = await this.fetchPlaylist(playlistUrl, limit);
+        videos = preferRicherList(videos, videosFromPlaylist(fullInfo, limit));
+      } catch (err) {
+        if ((err && err.cancelled) || this.stopped) throw err;
+        this.log('warn', `Полный список Shorts не открылся, беру вкладку канала: ${shortYtError(err && err.message)}`);
       }
     }
     const selected = [];
@@ -548,7 +573,15 @@ class ChannelCollector {
         `С ${formatSinceDate(this.since)} взяты первые ${limit} роликов, более старые не проверялись: ${channelUrl}`
       );
     }
-    await this.probeMissing(selected);
+    const pending = selected.filter((video) => video.duration == null);
+    if (pending.length > MAX_INLINE_PROBES) {
+      this.log(
+        'warn',
+        `У ${pending.length} Shorts нет длительности в списке — по одному их не проверяю, чтобы сбор не завис: ${channelUrl}`
+      );
+    } else if (pending.length) {
+      await this.probeMissing(pending);
+    }
     if (this.since) {
       for (let index = selected.length - 1; index >= 0; index -= 1) {
         const video = selected[index];
@@ -715,6 +748,9 @@ module.exports = {
   DEFAULT_VIDEO_COUNT,
   DEFAULT_CHANNEL_CONCURRENCY,
   PROBE_CONCURRENCY,
+  MAX_INLINE_PROBES,
+  knownDurationCount,
+  preferRicherList,
   shortsPlaylistUrl,
   normalizeVideoCount,
   normalizeChannelConcurrency,
