@@ -3,7 +3,7 @@
 /**
  * channels.js — сбор ссылок на свежие короткие ролики с каналов YouTube.
  *
- * Видео не скачиваются. С каждого канала берутся ролики с указанной даты.
+ * Видео не скачиваются. С каждого канала берётся вкладка Shorts и ролики с указанной даты.
  * Если ролик не длиннее 2,5 минут (150 с), его ссылка дописывается в Links.txt.
  * Уже виденные ролики запоминаются в channel_history.json: если новых
  * видео нет, канал пропускается и ссылка повторно не пишется.
@@ -114,14 +114,11 @@ function normalizeChannelUrl(raw) {
   if (!parts.length) return null;
   const head = parts[0];
   const tail = parts[1] || '';
-  const tab = (parts[2] || '').toLowerCase();
   let pathname = null;
   if (head.startsWith('@')) {
-    pathname = /^(videos|shorts|streams)$/i.test(tail) ? `/${head}/${tail.toLowerCase()}` : `/${head}/videos`;
-  } else if ((head === 'channel' || head === 'c' || head === 'user') && tail) {
-    pathname = /^(videos|shorts|streams)$/i.test(tab)
-      ? `/${head}/${tail}/${tab.toLowerCase()}`
-      : `/${head}/${tail}/videos`;
+    pathname = `/${head}/shorts`;
+  } else if ((head === 'channel' || head === 'c' || head === 'user') && tail && !/^(videos|shorts|streams|featured|about|playlists|community|posts)$/i.test(tail)) {
+    pathname = `/${head}/${tail}/shorts`;
   }
   if (!pathname) return null;
   return `https://www.youtube.com${pathname}`;
@@ -391,12 +388,9 @@ class ChannelCollector {
         if (!video.uploadDate && probed.uploadDate) video.uploadDate = probed.uploadDate;
         if (probed.title) video.title = probed.title;
       }
-      if (this.since) {
-        if (!video.uploadDate) continue;
-        if (video.uploadDate < this.since) {
-          reachedOlder = true;
-          break;
-        }
+      if (this.since && video.uploadDate && video.uploadDate < this.since) {
+        reachedOlder = true;
+        break;
       }
       selected.push(video);
     }
@@ -406,7 +400,7 @@ class ChannelCollector {
         `С ${formatSinceDate(this.since)} взяты первые ${limit} роликов, более старые не проверялись: ${channelUrl}`
       );
     }
-    return { key: channelKeyFrom(info, channelUrl), videos: selected };
+    return { key: channelKeyFrom(info, channelUrl), videos: selected, reachedOlder };
   }
 
   async run(text) {
@@ -441,8 +435,8 @@ class ChannelCollector {
     };
 
     const windowText = this.since
-      ? `с ${formatSinceDate(this.since)}, все ролики с этой даты`
-      : `последних видео с канала: ${this.count}`;
+      ? `Shorts с ${formatSinceDate(this.since)}`
+      : `последних Shorts с канала: ${this.count}`;
     this.log(
       'info',
       `Каналов: ${parsed.length}, ${windowText}, не длиннее ${durationLimitLabel(this.maxSeconds)} (${this.maxSeconds} с)`
@@ -462,11 +456,23 @@ class ChannelCollector {
             ? history.channels[key]
             : { input: channelUrl, seen: [] };
           const seen = new Set(Array.isArray(record.seen) ? record.seen : []);
+          if (!listed.videos.length) {
+            summary.checked += 1;
+            summary.ignored += 1;
+            this.log(
+              'info',
+              listed.reachedOlder
+                ? `На вкладке Shorts нет роликов с ${formatSinceDate(this.since)}: ${channelUrl}`
+                : `На вкладке Shorts нет роликов: ${channelUrl}`
+            );
+            this.emit(summary);
+            continue;
+          }
           const decision = classifyFresh(listed.videos, seen, this.maxSeconds);
           summary.checked += 1;
           if (decision.ignored) {
             summary.ignored += 1;
-            this.log('info', `Новых видео нет — канал пропущен: ${channelUrl}`);
+            this.log('info', `Новых Shorts нет — канал пропущен: ${channelUrl}`);
             this.emit(summary);
             continue;
           }

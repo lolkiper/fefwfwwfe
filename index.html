@@ -705,9 +705,10 @@
             </div>
             <div class="field">
               <label for="ch-links">Ссылки на каналы (одна или много, до 200)</label>
-              <textarea id="ch-links" rows="12" spellcheck="false" placeholder="https://www.youtube.com/@channel/videos&#10;https://www.youtube.com/@channel/shorts&#10;@channel"></textarea>
+              <textarea id="ch-links" rows="12" spellcheck="false" placeholder="https://www.youtube.com/@channel&#10;https://www.youtube.com/@channel/shorts&#10;@channel"></textarea>
               <p class="field__note" id="ch-links-note">
-                Подходят @имя, /channel/, /c/, /user/ и вкладки /videos, /shorts, /streams.
+                Берутся только Shorts. Подходят @имя, /channel/, /c/ и /user/.
+                Ссылка на вкладку «Видео» тоже открывает Shorts этого канала.
                 Ссылки на отдельные ролики сюда не берутся.
               </p>
             </div>
@@ -722,8 +723,8 @@
               <label for="ch-since">Все ролики с этой даты</label>
               <input type="date" id="ch-since" />
               <p class="field__note">
-                Например 10 ноября — дата меняется. С каждого канала берутся все ролики с этого дня включительно.
-                Если ролик не длиннее 2,5 минут (150 секунд), ссылка пишется в Links.txt.
+                Например 10 ноября — дата меняется. С вкладки Shorts каждого канала берутся все ролики с этого дня включительно.
+                Если Shorts не длиннее 2,5 минут (150 секунд), ссылка пишется в Links.txt.
                 Уже виденные ролики запоминаются: если новых нет, канал пропускается и ссылка повторно не пишется.
               </p>
             </div>

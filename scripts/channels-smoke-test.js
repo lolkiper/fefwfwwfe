@@ -46,21 +46,21 @@ function playlist(channelId, entries) {
 
 function main() {
   console.log('1) Разбор ссылок на каналы…');
-  check(normalizeChannelUrl('@SomeChannel') === 'https://www.youtube.com/@SomeChannel/videos', '@имя становится вкладкой видео');
+  check(normalizeChannelUrl('@SomeChannel') === 'https://www.youtube.com/@SomeChannel/shorts', '@имя открывает вкладку Shorts');
   check(
     normalizeChannelUrl('https://m.youtube.com/@SomeChannel/shorts') === 'https://www.youtube.com/@SomeChannel/shorts',
     'мобильная ссылка на Shorts сохраняет вкладку'
   );
-  check(normalizeChannelUrl('https://www.youtube.com/channel/UCabcdefghijk/videos').includes('/channel/UCabcdefghijk/videos'), 'channel/UC принимается');
+  check(normalizeChannelUrl('https://www.youtube.com/channel/UCabcdefghijk/videos') === 'https://www.youtube.com/channel/UCabcdefghijk/shorts', 'channel/UC и вкладка видео открывают Shorts');
   check(
-    normalizeChannelUrl('https://www.youtube.com/@SomeChannel/featured') === 'https://www.youtube.com/@SomeChannel/videos',
-    'вкладка featured считается каналом и открывает видео'
+    normalizeChannelUrl('https://www.youtube.com/@SomeChannel/featured') === 'https://www.youtube.com/@SomeChannel/shorts',
+    'вкладка featured открывает Shorts этого канала'
   );
   check(normalizeChannelUrl('https://www.youtube.com/watch?v=AAAAAAAAAAA') === null, 'ссылка на ролик не считается каналом');
   check(normalizeChannelUrl('https://youtu.be/AAAAAAAAAAA') === null, 'youtu.be не считается каналом');
   const parsed = parseChannelList(`
     @One
-    https://www.youtube.com/@One/videos
+    https://www.youtube.com/@One/shorts
     https://www.youtube.com/@Two/shorts
     https://www.youtube.com/watch?v=AAAAAAAAAAA
     мусор
@@ -98,14 +98,14 @@ function main() {
   fs.mkdirSync(ROOT, { recursive: true });
   fs.writeFileSync(path.join(ROOT, LINKS_FILE), 'https://www.youtube.com/watch?v=OLDVIDEOxxx\n', 'utf8');
   const catalogs = {
-    'https://www.youtube.com/@Alpha/videos': playlist('UCalpha', [
+    'https://www.youtube.com/@Alpha/shorts': playlist('UCalpha', [
       { id: 'ALPHASHORT1', duration: 48, title: 'new short' },
       { id: 'ALPHAOLD111', duration: 20, title: 'older' }
     ]),
-    'https://www.youtube.com/@Beta/videos': playlist('UCbeta', [
+    'https://www.youtube.com/@Beta/shorts': playlist('UCbeta', [
       { id: 'BETALONG111', duration: 300, title: 'long' }
     ]),
-    'https://www.youtube.com/@Gamma/videos': playlist('UCgamma', [
+    'https://www.youtube.com/@Gamma/shorts': playlist('UCgamma', [
       { id: 'GAMMANODUR1', duration: null, title: '' }
     ]),
     'https://www.youtube.com/watch?v=GAMMANODUR1': {
@@ -145,13 +145,13 @@ function main() {
 
     console.log('\n3) Повтор того же канала без новых видео ничего не дописывает…');
     const again = new ChannelCollector({ outputDir: ROOT, count: 1, runner });
-    const second = await again.run('https://www.youtube.com/@Alpha/videos\nhttps://www.youtube.com/@Beta/videos');
+    const second = await again.run('https://www.youtube.com/@Alpha/shorts\nhttps://www.youtube.com/@Beta/shorts');
     check(second.ignored === 2 && second.links === 0, 'оба канала проигнорированы', JSON.stringify(second));
     const linesAfter = fs.readFileSync(path.join(ROOT, LINKS_FILE), 'utf8').split(/\r?\n/).filter(Boolean);
     check(linesAfter.length === 3, 'Links.txt не получил повторную ссылку', linesAfter.join(' | '));
 
     console.log('\n4) Новое короткое видео канала попадает в файл, старое — нет…');
-    catalogs['https://www.youtube.com/@Alpha/videos'] = playlist('UCalpha', [
+    catalogs['https://www.youtube.com/@Alpha/shorts'] = playlist('UCalpha', [
       { id: 'ALPHANEW222', duration: 33, title: 'newer' },
       { id: 'ALPHASHORT1', duration: 48, title: 'previous' }
     ]);
@@ -191,14 +191,19 @@ function main() {
     fs.mkdirSync(sinceDir, { recursive: true });
     const day = (ymd) => Math.floor(Date.UTC(Number(ymd.slice(0, 4)), Number(ymd.slice(4, 6)) - 1, Number(ymd.slice(6, 8)), 12) / 1000);
     let playlistEnd = null;
+    let requested = '';
     const sinceCollector = new ChannelCollector({
       outputDir: sinceDir,
       since: '2026-11-10',
       count: 1,
       runner: async (args) => {
-        const endAt = args.indexOf('--playlist-end');
-        playlistEnd = endAt >= 0 ? args[endAt + 1] : null;
+        if (args.includes('--flat-playlist')) {
+          const endAt = args.indexOf('--playlist-end');
+          playlistEnd = endAt >= 0 ? args[endAt + 1] : null;
+          requested = args[args.length - 1];
+        }
         return playlist('UCsince', [
+          { id: 'NODATESHORT', duration: 40, title: 'short without date' },
           { id: 'NOV20SHORT1', duration: 140, timestamp: day('20261120'), title: '20 nov' },
           { id: 'NOV10EXACT1', duration: 150, timestamp: day('20261110'), title: '10 nov exact' },
           { id: 'NOV10TOOLNG', duration: 151, timestamp: day('20261110'), title: '10 nov long' },
@@ -208,10 +213,11 @@ function main() {
       }
     });
     const sinceSummary = await sinceCollector.run('@Since');
+    check(String(requested).endsWith('/@Since/shorts'), 'запрос идёт на вкладку Shorts', requested);
     check(playlistEnd === String(MAX_SINCE_VIDEOS), 'с даты запрашивается окно роликов, а не одно последнее', playlistEnd);
-    check(sinceSummary.links === 2 && sinceSummary.tooLong === 1, 'с 10 ноября записаны ролики до 150 с, более длинный нет', JSON.stringify(sinceSummary));
+    check(sinceSummary.links === 3 && sinceSummary.tooLong === 1, 'с 10 ноября записаны Shorts до 150 с, более длинный нет', JSON.stringify(sinceSummary));
     const sinceLines = fs.readFileSync(path.join(sinceDir, LINKS_FILE), 'utf8');
-    check(sinceLines.includes('NOV20SHORT1') && sinceLines.includes('NOV10EXACT1'), 'ролики с даты и в сам день попали в Links.txt');
+    check(sinceLines.includes('NODATESHORT') && sinceLines.includes('NOV20SHORT1') && sinceLines.includes('NOV10EXACT1'), 'Shorts без даты, с даты и в сам день попали в Links.txt');
     check(!sinceLines.includes('NOV09SHORT1') && !sinceLines.includes('NOV01SHORT1'), 'ролики раньше выбранной даты не записаны');
     const sinceHistory = JSON.parse(fs.readFileSync(path.join(sinceDir, HISTORY_FILE), 'utf8'));
     check(sinceHistory.channels.UCsince.seen.includes('NOV10TOOLNG'), 'длинный ролик с этой даты запомнен');
