@@ -4,7 +4,7 @@ title Shorts Inserter - build EXE
 cd /d "%~dp0"
 
 echo ==============================================
-echo  Shorts Inserter 2.4.7 - Windows EXE build
+echo  Shorts Inserter 2.4.8 - Windows EXE build
 echo ==============================================
 echo.
 
@@ -42,8 +42,8 @@ if errorlevel 1 (
 echo.
 echo ==============================================
 echo  DONE. Look in the "dist" folder:
-echo    - "Shorts_Inserter_Setup_2.4.7.exe"  (installer)
-echo    - "Shorts Inserter 2.4.7.exe"        (portable)
+echo    - "Shorts_Inserter_Setup_2.4.8.exe"  (installer)
+echo    - "Shorts Inserter 2.4.8.exe"        (portable)
 echo ==============================================
 dir /b dist\*.exe 2>nul
 echo.

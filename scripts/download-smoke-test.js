@@ -573,6 +573,68 @@ async function main() {
   check(noCookieSaved.items[0].status === STATUS.SKIPPED, 'после двух неудач ссылка пропущена', noCookieSaved.items[0].status);
   check(noCookieSaved.items[0].attempts === MAX_ITEM_ATTEMPTS, 'засчитаны ровно две попытки', String(noCookieSaved.items[0].attempts));
 
+  console.log('\n7b) Скачивание и проверка аудио берут cookies после проверки на бота…');
+  const botDir = path.join(ROOT, 'bot-audio');
+  fs.mkdirSync(botDir, { recursive: true });
+  const botBrowsers = cookieBrowserCandidates();
+  const goodBrowser = botBrowsers[Math.min(1, botBrowsers.length - 1)];
+  const botInfoFor = (id) => ({
+    id,
+    title: `Ролик ${id}`,
+    language: 'es',
+    formats: [
+      { format_id: '137', height: 1080, width: 1920, vcodec: 'avc1', acodec: 'none', vbr: 4000 },
+      {
+        format_id: '140',
+        vcodec: 'none',
+        acodec: 'mp4a.40.2',
+        abr: 128,
+        language: 'es',
+        language_preference: 10,
+        format_note: 'Spanish original',
+        ext: 'm4a'
+      }
+    ]
+  });
+  const botCalls = [];
+  const botBase = createMockRunner({
+    outputDir: botDir,
+    titles: { BOTAUDIO001: 'Ролик 1', BOTAUDIO002: 'Ролик 2' }
+  });
+  const botError = "ERROR: [youtube] x: Sign in to confirm you're not a bot. Use --cookies-from-browser";
+  const botQueue = new DownloadQueue({
+    outputDir: botDir,
+    ffmpegPath: 'ffmpeg',
+    ffprobePath: null,
+    defaultAudioLang: 'original',
+    runner: async (args, onLine) => {
+      const cookieAt = args.indexOf('--cookies-from-browser');
+      const browser = cookieAt >= 0 ? args[cookieAt + 1] : null;
+      const probe = args.includes('-J');
+      botCalls.push({ probe, browser });
+      if (!browser || browser !== goodBrowser) throw new Error(botError);
+      if (probe) {
+        const id = String(args[args.length - 1]).match(/[A-Za-z0-9_-]{11}/);
+        return { stdout: JSON.stringify(botInfoFor(id ? id[0] : 'BOTAUDIO001')), stderr: '' };
+      }
+      return botBase(args, onLine);
+    }
+  });
+  botQueue.probeOutput = async () => ({ hasVideo: true, hasAudio: true, audioLanguage: 'spa' });
+  botQueue.setLinks('https://youtube.com/shorts/BOTAUDIO001\nhttps://youtube.com/shorts/BOTAUDIO002');
+  botQueue.items.forEach((item) => {
+    item.audioLang = 'original';
+  });
+  const botDetected = await botQueue.detectAudio({});
+  check(botDetected.length === 2 && botDetected.every((entry) => entry.ok), 'проверка аудио проходит через cookies браузера', JSON.stringify(botDetected));
+  check(
+    botCalls.some((call) => call.probe && call.browser === null) && botCalls.filter((call) => call.probe && call.browser === goodBrowser).length >= 2,
+    'после первой проверки остальные ролики сразу идут с рабочими cookies',
+    botCalls.map((call) => `${call.probe ? 'J' : 'dl'}:${call.browser || '-'}`).join(' ')
+  );
+  const botSummary = await botQueue.run();
+  check(botSummary.completed === 2 && botSummary.skipped === 0, 'скачивание тоже проходит проверку YouTube через cookies', JSON.stringify(botSummary));
+
   console.log('\n8) Названия встают перед старыми строками nazvaniya.txt…');
   check(composeTitles(['Название1', 'Название2'], '1\n2\n3\n') === 'Название1\nНазвание2\n1\n2\n3\n', 'блок новых названий стоит перед старыми строками');
   const prependDir = path.join(ROOT, 'prepend');

@@ -857,6 +857,14 @@ handle('download:load', (ws, outputDir, rt) => {
 
 handle('download:start', async (ws, payload, rt) => {
   if (rt.download && rt.download.running) return { ok: false, error: 'Скачивание в этой вкладке уже запущено' };
+  if (rt.detecting && rt.detectQueue) {
+    rt.detectQueue.stopped = true;
+    if (typeof rt.detectQueue.stopCurrentProcess === 'function') rt.detectQueue.stopCurrentProcess();
+    const waitStarted = Date.now();
+    while (rt.detecting && Date.now() - waitStarted < 5000) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
   if (rt.detecting) return { ok: false, error: 'Дождитесь окончания проверки аудиодорожек.' };
   const outputDir = typeof payload.outputDir === 'string' ? payload.outputDir.trim() : '';
   const text = typeof payload.text === 'string' ? payload.text : '';
@@ -993,8 +1001,10 @@ handle('download:detect-audio', async (ws, payload, rt) => {
     return { ok: false, error: 'yt-dlp не найден. Переустановите программу или положите yt-dlp в vendor/yt-dlp.' };
   }
   rt.detecting = true;
+  rt.detectQueue = null;
   try {
     const queue = openQueue(ws.id, outputDir, true);
+    rt.detectQueue = queue;
     if (!queue.items.length) {
       return { ok: false, error: 'Очередь пуста. Сначала добавьте ссылки и запустите скачивание или загрузку очереди.' };
     }
@@ -1008,6 +1018,7 @@ handle('download:detect-audio', async (ws, payload, rt) => {
     return { ok: false, error: err.message };
   } finally {
     rt.detecting = false;
+    rt.detectQueue = null;
   }
 });
 

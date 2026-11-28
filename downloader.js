@@ -1519,6 +1519,26 @@ class DownloadQueue {
     return info;
   }
 
+  /** Проба -J с повтором через cookies браузера, если YouTube просит вход. */
+  async probeInfoHandlingCookies(item, url) {
+    let used = this.cookiesFromBrowser || null;
+    for (;;) {
+      if (this.stopped) {
+        const err = new Error('Остановлено');
+        err.cancelled = true;
+        throw err;
+      }
+      try {
+        return await this.probeInfo(url || item.url, { cookiesFromBrowser: used });
+      } catch (err) {
+        if ((err && err.cancelled) || this.stopped) throw err;
+        const next = this.nextCookieBrowser(item, used, err && err.message);
+        if (next === undefined) throw err;
+        used = next;
+      }
+    }
+  }
+
   applyInfo(item, info) {
     if (!info || typeof info !== 'object') return;
     const title = String(info.title || info.fulltitle || '').trim();
@@ -1734,12 +1754,17 @@ class DownloadQueue {
         ? new Set(options.numbers.map(Number))
         : null;
     const results = [];
+    let blocked = false;
     for (const item of this.items) {
       if (wanted && !wanted.has(Number(item.number))) continue;
       if (options.onlyUnchecked && item.audioChecked) continue;
       if (this.stopped) break;
+      if (blocked) {
+        results.push({ number: item.number, ok: false, error: 'Проверка остановлена: YouTube просит вход' });
+        continue;
+      }
       try {
-        const info = await this.probeInfo(item.url);
+        const info = await this.probeInfoHandlingCookies(item, item.url);
         this.applyInfo(item, info);
         const tracks = collectAudioTracks(info.formats || [], info);
         this.applyAudioTracks(item, tracks, info);
@@ -1752,10 +1777,18 @@ class DownloadQueue {
           missing: item.audioMissing
         });
       } catch (err) {
+        if ((err && err.cancelled) || this.stopped) break;
         item.audioChecked = false;
         const message = shortYtError(err && err.message);
         this.log('warn', `#${item.number} не удалось получить аудиодорожки: ${message}`);
         results.push({ number: item.number, ok: false, error: message });
+        if (isBotCheckError(message)) {
+          blocked = true;
+          this.log(
+            'warn',
+            'Дальше аудиодорожки не проверяю. Войдите в YouTube в Edge, Chrome или Firefox, закройте браузер и нажмите «Проверить аудиодорожки» ещё раз.'
+          );
+        }
       }
     }
     this.persist();
@@ -1817,7 +1850,7 @@ class DownloadQueue {
 
     const total = this.items.length;
     this.log('info', `[${item.number}/${total}] Получение информации`);
-    const info = await this.probeInfo(item.url);
+    const info = await this.probeInfoHandlingCookies(item, item.url);
     this.applyInfo(item, info);
     const tracks = collectAudioTracks(info.formats || [], info);
     this.applyAudioTracks(item, tracks, info);
@@ -1996,10 +2029,28 @@ class DownloadQueue {
       const shared = this.cookiesFromBrowser;
       const next = shared && !this.failedCookieBrowsers.has(shared) ? shared : untried();
       if (!next) {
-        this.log('warn', `#${item.number} YouTube просит вход, а cookies ни из одного браузера не читаются — войдите в YouTube в Firefox или закройте Edge/Chrome`);
+        this.log(
+          'warn',
+          `#${item.number} YouTube просит вход, а cookies ни из одного браузера не читаются — войдите в YouTube в Edge, Chrome или Firefox и закройте браузер`
+        );
         return undefined;
       }
       if (next !== shared) this.log('warn', `#${item.number} YouTube просит вход — пробую cookies из ${next}`);
+      this.cookiesFromBrowser = next;
+      return next;
+    }
+    if (used && isBotCheckError(message)) {
+      this.failedCookieBrowsers.add(used);
+      if (this.cookiesFromBrowser === used) this.cookiesFromBrowser = null;
+      const next = untried();
+      if (!next) {
+        this.log(
+          'warn',
+          `#${item.number} YouTube просит вход, а cookies ни из одного браузера не читаются — войдите в YouTube в Edge, Chrome или Firefox и закройте браузер`
+        );
+        return undefined;
+      }
+      this.log('warn', `#${item.number} cookies из ${used} не приняты — пробую ${next}`);
       this.cookiesFromBrowser = next;
       return next;
     }
