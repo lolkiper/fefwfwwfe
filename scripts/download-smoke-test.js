@@ -43,6 +43,13 @@ const {
   ARIA2_DOWNLOADER_ARGS,
   STATUS
 } = require('../downloader');
+const {
+  hasYouTubeSession,
+  writeNetscapeCookies,
+  listBrowserProfiles,
+  readYoutubeCookiesFromDebugger,
+  exportYoutubeCookies
+} = require('../browser-cookies');
 
 const ROOT = path.join(os.tmpdir(), `shorts-download-smoke-${process.pid}`);
 let failures = 0;
@@ -634,6 +641,109 @@ async function main() {
   );
   const botSummary = await botQueue.run();
   check(botSummary.completed === 2 && botSummary.skipped === 0, 'скачивание тоже проходит проверку YouTube через cookies', JSON.stringify(botSummary));
+
+  console.log('\n7c) Занятый файл cookies читается через браузер, а не копированием базы…');
+  check(await exportYoutubeCookies() === null, 'на этой системе без Windows чтение профиля не запускается');
+  check(hasYouTubeSession([{ name: 'SID', value: 'abc', domain: '.youtube.com' }]), 'SID с YouTube считается входом');
+  check(!hasYouTubeSession([{ name: 'VISITOR_INFO1_LIVE', value: 'x', domain: '.youtube.com' }]), 'гости без SID не считаются входом');
+  const netscapeDir = path.join(ROOT, 'cookie-file');
+  fs.mkdirSync(netscapeDir, { recursive: true });
+  const profileRoot = path.join(netscapeDir, 'User Data');
+  fs.mkdirSync(path.join(profileRoot, 'Default', 'Network'), { recursive: true });
+  fs.mkdirSync(path.join(profileRoot, 'Profile 1'), { recursive: true });
+  fs.writeFileSync(path.join(profileRoot, 'Local State'), JSON.stringify({ profile: { last_used: 'Profile 1' } }));
+  fs.writeFileSync(path.join(profileRoot, 'Profile 1', 'Cookies'), '');
+  const profileOrder = listBrowserProfiles(profileRoot);
+  check(profileOrder[0] === 'Profile 1', 'сначала читается последний профиль браузера', profileOrder.join(','));
+  const netscape = path.join(netscapeDir, 'cookies.txt');
+  writeNetscapeCookies(netscape, [
+    { name: 'SID', value: 'secret\tvalue', domain: '.youtube.com', path: '/', secure: true, expires: 1893456000 },
+    { name: 'other', value: 'nope', domain: '.example.com', path: '/', secure: false, expires: 10 }
+  ]);
+  const netscapeText = fs.readFileSync(netscape, 'utf8');
+  check(netscapeText.startsWith('# Netscape HTTP Cookie File'), 'cookies.txt в формате Netscape');
+  check(netscapeText.includes('.youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecretvalue'), 'в файл попадает только cookie YouTube', netscapeText);
+  const net = require('net');
+  const crypto = require('crypto');
+  const wsCookies = await new Promise((resolve, reject) => {
+    const server = net.createServer((socket) => {
+      let buf = Buffer.alloc(0);
+      let handshook = false;
+      socket.on('data', (chunk) => {
+        buf = Buffer.concat([buf, chunk]);
+        if (!handshook) {
+          const end = buf.indexOf('\r\n\r\n');
+          if (end < 0) return;
+          const header = buf.slice(0, end).toString('utf8');
+          const key = (header.match(/Sec-WebSocket-Key:\s*(.+)/i) || [])[1];
+          const accept = crypto.createHash('sha1').update(`${(key || '').trim()}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+          socket.write(
+            'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n' +
+              `Sec-WebSocket-Accept: ${accept}\r\n\r\n`
+          );
+          buf = buf.slice(end + 4);
+          handshook = true;
+        }
+        if (!handshook || buf.length < 2) return;
+        const body = Buffer.from(JSON.stringify({
+          id: 1,
+          result: {
+            cookies: [{ name: 'LOGIN_INFO', value: 'logged-in', domain: '.youtube.com', path: '/', secure: true, expires: 1893456000 }]
+          }
+        }));
+        const header = body.length < 126 ? Buffer.from([0x81, body.length]) : Buffer.alloc(4);
+        if (body.length >= 126) {
+          header[0] = 0x81;
+          header[1] = 126;
+          header.writeUInt16BE(body.length, 2);
+        }
+        socket.write(Buffer.concat([header, body]));
+        buf = Buffer.alloc(0);
+      });
+    });
+    server.listen(0, '127.0.0.1', async () => {
+      try {
+        const { port } = server.address();
+        const cookies = await readYoutubeCookiesFromDebugger(`ws://127.0.0.1:${port}/devtools/browser/test`, 3000);
+        resolve(cookies);
+      } catch (err) {
+        reject(err);
+      } finally {
+        server.close();
+      }
+    });
+  });
+  check(hasYouTubeSession(wsCookies), 'cookies приходят из открытого браузера уже расшифрованными', JSON.stringify(wsCookies));
+
+  const sessionDir = path.join(ROOT, 'cookie-session');
+  fs.mkdirSync(sessionDir, { recursive: true });
+  const sessionFile = path.join(sessionDir, 'youtube-cookies.txt');
+  writeNetscapeCookies(sessionFile, [{ name: 'SID', value: 'from-edge', domain: '.youtube.com', path: '/', secure: true, expires: 1893456000 }]);
+  let sessionExports = 0;
+  const sessionCalls = [];
+  const sessionBase = createMockRunner({ outputDir: sessionDir, titles: { SESSION00001: 'Session' } });
+  const sessionQueue = new DownloadQueue({
+    outputDir: sessionDir,
+    ffmpegPath: 'ffmpeg',
+    ffprobePath: null,
+    exportYoutubeCookies: async () => {
+      sessionExports += 1;
+      return sessionFile;
+    },
+    runner: async (args, onLine) => {
+      const mode = args.includes('--cookies') ? 'file' : 'bare';
+      sessionCalls.push(mode);
+      if (mode === 'bare') throw new Error("ERROR: [youtube] x: Sign in to confirm you're not a bot");
+      check(!args.includes('--cookies-from-browser'), 'файл cookies не смешивается с заблокированной базой браузера');
+      return sessionBase(args, onLine);
+    }
+  });
+  sessionQueue.probeOutput = async () => ({ hasVideo: true, hasAudio: true, audioLanguage: 'spa' });
+  sessionQueue.setLinks('https://youtube.com/shorts/SESSION00001');
+  const sessionSummary = await sessionQueue.run();
+  check(sessionSummary.completed === 1, 'скачивание проходит с cookies, которые отдал сам браузер', JSON.stringify(sessionSummary));
+  check(sessionExports === 1, 'Edge открывается один раз на всю очередь', String(sessionExports));
+  check(sessionCalls[0] === 'bare' && sessionCalls.includes('file'), 'сначала без cookies, затем с файлом из браузера', sessionCalls.join(','));
 
   console.log('\n8) Названия встают перед старыми строками nazvaniya.txt…');
   check(composeTitles(['Название1', 'Название2'], '1\n2\n3\n') === 'Название1\nНазвание2\n1\n2\n3\n', 'блок новых названий стоит перед старыми строками');

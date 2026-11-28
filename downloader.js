@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const { spawn, execFile, execFileSync } = require('child_process');
+const { exportYoutubeCookies } = require('./browser-cookies');
 
 /** Значение по умолчанию для библиотеки; приложение передаёт выбор из интерфейса. */
 const MAX_CONCURRENT_DOWNLOADS = 1;
@@ -279,7 +280,7 @@ function easeChildProcess(child) {
   }
 }
 
-function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, playlist, extractorArgs } = {}) {
+function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, cookiesFile, playlist, extractorArgs } = {}) {
   const args = [
     '--ignore-config',
     playlist ? '--yes-playlist' : '--no-playlist',
@@ -294,7 +295,8 @@ function buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, playlist, extractor
     extractorArgs || YOUTUBE_EXTRACTOR_ARGS,
     ...resolveJsRuntimeArgs(ytdlpPath)
   ];
-  if (cookiesFromBrowser) args.push('--cookies-from-browser', cookiesFromBrowser);
+  if (cookiesFile) args.push('--cookies', cookiesFile);
+  else if (cookiesFromBrowser) args.push('--cookies-from-browser', cookiesFromBrowser);
   return args;
 }
 
@@ -807,12 +809,13 @@ function buildYtDlpDownloadArgs({
   preferMp4,
   ytdlpPath,
   cookiesFromBrowser,
+  cookiesFile,
   aria2cPath,
   concurrency
 }) {
   const aria = aria2cPath || resolveAria2cPath(ytdlpPath);
   const args = [
-    ...buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser }),
+    ...buildBaseYtDlpArgs({ ytdlpPath, cookiesFromBrowser, cookiesFile }),
     ...buildAria2cDownloaderArgs(aria, concurrency),
     '--newline',
     '--progress',
@@ -1155,6 +1158,10 @@ class DownloadQueue {
     this.activeItems = new Map();
     this.children = new Set();
     this.cookiesFromBrowser = options.cookiesFromBrowser || null;
+    this.cookiesFile = null;
+    this.exportYoutubeCookies = options.exportYoutubeCookies || null;
+    this._cookieExportPromise = null;
+    this._cookieExportFailed = false;
     this.failedCookieBrowsers = new Set();
     this.defaultAudioLang = normalizeAudioLang(options.defaultAudioLang || DEFAULT_AUDIO_LANG);
   }
@@ -1501,12 +1508,19 @@ class DownloadQueue {
   }
 
   async probeInfo(url, extra = {}) {
+    const cookiesFile = Object.prototype.hasOwnProperty.call(extra, 'cookiesFile') ? extra.cookiesFile : this.cookiesFile;
+    const cookiesFromBrowser = cookiesFile
+      ? null
+      : (Object.prototype.hasOwnProperty.call(extra, 'cookiesFromBrowser')
+        ? extra.cookiesFromBrowser
+        : this.cookiesFromBrowser);
     const { stdout, stderr } = await this.runYtDlp([
       '-J',
       '--no-warnings',
       ...buildBaseYtDlpArgs({
         ytdlpPath: this.ytdlpPath,
-        cookiesFromBrowser: extra.cookiesFromBrowser || this.cookiesFromBrowser
+        cookiesFromBrowser,
+        cookiesFile
       }),
       url
     ]);
@@ -1519,6 +1533,58 @@ class DownloadQueue {
     return info;
   }
 
+  /** Один раз забирает расшифрованные cookies из Edge/Chrome, пока файл базы занят. */
+  async ensureCookieFile(item) {
+    if (this.cookiesFile) return this.cookiesFile;
+    if (this._cookieExportFailed) return null;
+    if (!this._cookieExportPromise) {
+      const exporter = this.exportYoutubeCookies || exportYoutubeCookies;
+      this._cookieExportPromise = Promise.resolve()
+        .then(() => exporter({
+          log: (message) => this.log('warn', `#${item.number} ${message}`),
+          shouldStop: () => this.stopped
+        }))
+        .then((file) => file || null);
+    }
+    let file = null;
+    try {
+      file = await this._cookieExportPromise;
+    } catch (err) {
+      file = null;
+      this.log('warn', `#${item.number} не удалось прочитать вход YouTube: ${shortYtError(err && err.message)}`);
+    }
+    if (file) this.cookiesFile = file;
+    else this._cookieExportFailed = true;
+    return file;
+  }
+
+  /**
+   * true — повторить попытку: cookies.txt уже подставлен.
+   * Иначе вернуть браузер из nextCookieBrowser (или undefined, чтобы сдаться).
+   */
+  async retryAfterYtError(item, usedBrowser, err) {
+    if ((err && err.cancelled) || this.stopped) {
+      if (err) err.cancelled = true;
+      throw err;
+    }
+    const message = err && err.message;
+    if (usedBrowser === false && (isBotCheckError(message) || isCookieError(message))) {
+      this.log('warn', `#${item.number} вход из браузера прочитан, но YouTube его не принял`);
+      this.cookiesFile = null;
+      this.failedCookieBrowsers.add('edge');
+      this.failedCookieBrowsers.add('chrome');
+    } else if (usedBrowser !== false && !this.cookiesFile && isBotCheckError(message)) {
+      const file = await this.ensureCookieFile(item);
+      if (this.stopped) {
+        const stopErr = new Error('Остановлено');
+        stopErr.cancelled = true;
+        throw stopErr;
+      }
+      if (file) return true;
+    }
+    return this.nextCookieBrowser(item, usedBrowser || null, message);
+  }
+
   /** Проба -J с повтором через cookies браузера, если YouTube просит вход. */
   async probeInfoHandlingCookies(item, url) {
     let used = this.cookiesFromBrowser || null;
@@ -1528,11 +1594,15 @@ class DownloadQueue {
         err.cancelled = true;
         throw err;
       }
+      const usingFile = Boolean(this.cookiesFile);
       try {
-        return await this.probeInfo(url || item.url, { cookiesFromBrowser: used });
+        return await this.probeInfo(url || item.url, {
+          cookiesFile: usingFile ? this.cookiesFile : null,
+          cookiesFromBrowser: usingFile ? null : used
+        });
       } catch (err) {
-        if ((err && err.cancelled) || this.stopped) throw err;
-        const next = this.nextCookieBrowser(item, used, err && err.message);
+        const next = await this.retryAfterYtError(item, usingFile ? false : used, err);
+        if (next === true) continue;
         if (next === undefined) throw err;
         used = next;
       }
@@ -1907,7 +1977,7 @@ class DownloadQueue {
     const safeTitle = sanitizeFilename(item.title);
     const id = item.videoId || `item${item.number}`;
     const template = path.join(this.outputDir, `${item.number}_${id}.%(ext)s`);
-    const makeArgs = (cookiesFromBrowser) => buildYtDlpDownloadArgs({
+    const makeArgs = (cookiesFromBrowser, cookiesFile) => buildYtDlpDownloadArgs({
       url: item.url,
       template,
       format: audioPlan.format || FALLBACK_FORMAT,
@@ -1915,6 +1985,7 @@ class DownloadQueue {
       preferMp4: true,
       ytdlpPath: this.ytdlpPath,
       cookiesFromBrowser,
+      cookiesFile,
       aria2cPath: resolveAria2cPath(this.ytdlpPath),
       concurrency: this.concurrency
     });
@@ -1948,15 +2019,13 @@ class DownloadQueue {
         err.cancelled = true;
         throw err;
       }
+      const usingFile = Boolean(this.cookiesFile);
       try {
-        await this.runYtDlp(makeArgs(used), onLine);
+        await this.runYtDlp(makeArgs(usingFile ? null : used, usingFile ? this.cookiesFile : null), onLine);
         break;
       } catch (err) {
-        if ((err && err.cancelled) || this.stopped) {
-          if (err) err.cancelled = true;
-          throw err;
-        }
-        const next = this.nextCookieBrowser(item, used, err && err.message);
+        const next = await this.retryAfterYtError(item, usingFile ? false : used, err);
+        if (next === true) continue;
         if (next === undefined) throw err;
         used = next;
       }
